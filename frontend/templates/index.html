@@ -37,6 +37,12 @@
     <a class="nav-item" data-tab="active-learning" href="#">
       <i class="fa-solid fa-brain"></i> Active Learning
     </a>
+    <a class="nav-item" data-tab="video" href="#">
+      <i class="fa-solid fa-video"></i> Video Attendance
+    </a>
+    <a class="nav-item" data-tab="metrics" href="#">
+      <i class="fa-solid fa-chart-line"></i> Evaluation Metrics
+    </a>
     <a class="nav-item" data-tab="export" href="#">
       <i class="fa-solid fa-file-excel"></i> Export Excel
     </a>
@@ -263,6 +269,115 @@
 
       <div id="al-candidates-wrap">
         <p class="muted">Loading candidates...</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── VIDEO ATTENDANCE (NEW) ─────────────────────────────────── -->
+  <section class="tab" id="tab-video">
+    <div class="page-header"><h1>Video Attendance</h1></div>
+
+    <div class="card" style="max-width:640px">
+      <div class="card-header">Upload Class Video</div>
+      <p class="hint" style="margin-bottom:1rem">
+        Video provides much higher accuracy by analyzing multiple frames to capture students from different angles and avoid occlusions.
+      </p>
+
+      <div class="form-group">
+        <label>Attendance Date</label>
+        <input type="date" id="vid-date"/>
+      </div>
+
+      <div class="upload-zone large" id="vid-upload-zone">
+        <i class="fa-solid fa-video upload-icon"></i>
+        <p>Upload a short classroom video (10-15 seconds)</p>
+        <p class="hint">Supports MP4 / AVI / MOV</p>
+        <input type="file" id="vid-file" accept="video/*" hidden/>
+      </div>
+      <div id="vid-filename" class="result-box success" style="display:none; margin-top:1rem; margin-bottom:1rem; font-weight:bold;"></div>
+
+      <div class="att-action-buttons">
+        <button class="btn btn-primary" id="vid-process-btn">
+          <i class="fa-solid fa-wand-magic-sparkles"></i> Process Video
+        </button>
+        <button class="btn btn-ghost" id="vid-clear-btn" style="display:none">
+          <i class="fa-solid fa-rotate-right"></i> Clear Video
+        </button>
+      </div>
+
+      <div id="vid-spinner" class="spinner-wrap" style="display:none">
+        <div class="spinner"></div>
+        <p>Extracting frames and processing faces… please wait</p>
+      </div>
+
+      <div id="vid-result" style="display:none; margin-top: 2rem;">
+        <div class="att-summary-grid">
+          <div class="att-stat green"><span id="vr-present">0</span><small>Present</small></div>
+          <div class="att-stat red"><span id="vr-absent">0</span><small>Absent</small></div>
+          <div class="att-stat blue"><span id="vr-frames">0</span><small>Frames</small></div>
+          <div class="att-stat purple"><span id="vr-faces">0</span><small>Faces</small></div>
+        </div>
+        <div id="vid-details-wrap"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── EVALUATION METRICS (NEW) ───────────────────────────────── -->
+  <section class="tab" id="tab-metrics">
+    <div class="page-header">
+      <h1>Evaluation Metrics</h1>
+      <button class="btn btn-primary btn-sm" onclick="loadMetrics()">
+        <i class="fa-solid fa-rotate"></i> Refresh History
+      </button>
+    </div>
+
+    <!-- Summary -->
+    <div id="metrics-summary" style="margin-bottom: 2rem;"></div>
+
+    <div class="card" style="max-width:800px; margin-bottom: 2rem;">
+      <div class="card-header">Run New Evaluation</div>
+      <p class="hint" style="margin-bottom:1rem">
+        Upload a class photo and enter the roll numbers of the students who are ACTUALLY present in the photo.
+        The system will evaluate its accuracy (Precision, Recall, F1) against this ground truth.
+      </p>
+
+      <div class="form-row">
+        <div class="form-group" style="flex:1">
+          <label>Evaluation Date</label>
+          <input type="date" id="eval-date"/>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Ground Truth (Present Students)</label>
+        <input type="text" id="eval-ground-truth" placeholder="Comma separated: 080bct068,080bct073..." />
+        <p class="hint">Enter the roll numbers of everyone visibly present in the photo.</p>
+      </div>
+
+      <div class="form-group">
+        <div class="upload-zone" id="eval-upload-zone" style="min-height: 100px;">
+          <i class="fa-solid fa-image upload-icon"></i>
+          <p>Click to select classroom photo</p>
+          <input type="file" id="eval-photo" accept="image/*" hidden/>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="eval-btn">
+        <i class="fa-solid fa-vial"></i> Run Evaluation
+      </button>
+
+      <div id="eval-spinner" class="spinner-wrap" style="display:none; margin-top: 1rem;">
+        <div class="spinner"></div>
+        <p>Evaluating accuracy… please wait</p>
+      </div>
+
+      <div id="eval-result" style="display:none; margin-top: 1.5rem;"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">Evaluation History</div>
+      <div id="metrics-history-wrap">
+        <p class="muted">Loading history...</p>
       </div>
     </div>
   </section>

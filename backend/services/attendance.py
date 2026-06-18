@@ -27,11 +27,9 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_DIR      = Path(os.getenv("UPLOAD_DIR", "data/uploads"))
 MATCH_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", "0.45"))
-# When true, faces failing the liveness check are excluded from attendance.
-# When false, they are still counted (advisory mode) but reported in
-# `spoofs_rejected` so a misfiring model can't silently mark a real student
-# absent. Defaults to enforcing.
-SPOOF_ENFORCE   = os.getenv("SPOOF_ENFORCE", "true").lower() not in ("0", "false", "no")
+# Anti-spoof enforcement is now handled inside AntiSpoofing class 
+# via the ANTI_SPOOF_MODE env var ("disabled", "advisory", "enforce").
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -85,21 +83,15 @@ class AttendanceService:
             bbox      = face_data["bbox"]
             face_crop = face_data["face_crop"]
 
-            # Liveness check on every detected face (no group bypass)
+            # Liveness check on every detected face (mode-dependent)
             is_real, spoof_score = self.anti_spoof.is_real(image, bbox)
-            if not is_real:
+            if not is_real and self.anti_spoof.mode == "enforce":
                 spoofs_rejected += 1
-                if SPOOF_ENFORCE:
-                    logger.warning(f"Spoof rejected (score={spoof_score:.2f})")
-                    continue
-                logger.warning(
-                    f"Spoof flagged but counted (advisory mode, score={spoof_score:.2f})"
-                )
+                logger.warning(f"Spoof rejected (score={spoof_score:.2f})")
+                continue
 
-            # Use pre-computed embedding from detector if available, else compute
+            # Use pre-computed embedding from detector (which now correctly provides normed_embedding)
             embedding = face_data.get("embedding")
-            if embedding is None:
-                embedding = self.recognizer.get_embedding(face_crop)
             if embedding is None:
                 continue
 
