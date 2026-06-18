@@ -18,7 +18,40 @@ logger = logging.getLogger(__name__)
 EMBED_DIR = Path(os.getenv("EMBED_DIR") or os.getenv("EMBEDDINGS_DIR") or "data/embeddings")
 EMBED_DIR.mkdir(parents=True, exist_ok=True)
 
+PHOTO_DIR = Path(os.getenv("PHOTO_DIR") or os.getenv("STUDENT_PHOTOS_DIR") or "data/student_photos")
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+
 _shared_app = None
+
+# In-memory cache of {roll_no: embedding} loaded from EMBED_DIR.
+# Avoids re-reading every .npy from disk on each recognition request.
+_gallery: Optional[dict] = None
+
+
+def invalidate_gallery() -> None:
+    """Clear the cached embedding gallery.
+
+    Call this after any change to enrolled embeddings (enroll, re-enroll,
+    or removal) so the next match reloads fresh data from disk.
+    """
+    global _gallery
+    _gallery = None
+
+
+def load_gallery() -> dict:
+    """Return {roll_no: embedding} for all embeddings in EMBED_DIR, cached."""
+    global _gallery
+    if _gallery is None:
+        gallery: dict = {}
+        for path in EMBED_DIR.glob("*.npy"):
+            try:
+                gallery[path.stem] = np.load(path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to load embedding %s: %s", path.name, exc)
+        _gallery = gallery
+        logger.info("Loaded embedding gallery (%d students).", len(gallery))
+    return _gallery
 
 
 def get_shared_app():
@@ -57,8 +90,34 @@ class FaceRecognizer:
     def _embed_path(self, roll_no: str) -> Path:
         return self.embeddings_dir / f"{roll_no}.npy"
 
+    def enrollment_quality(self, roll_no: str) -> dict:
+        """Report how many enrollment photos a student has and a quality label.
+
+        good >= 5 photos, fair >= 3, otherwise poor (none if no photos).
+        """
+        student_dir = PHOTO_DIR / roll_no
+        if student_dir.exists():
+            photos = sum(
+                1 for f in student_dir.iterdir()
+                if f.is_file() and f.suffix.lower() in IMAGE_SUFFIXES
+            )
+        else:
+            photos = 0
+
+        if photos >= 5:
+            quality = "good"
+        elif photos >= 3:
+            quality = "fair"
+        elif photos >= 1:
+            quality = "poor"
+        else:
+            quality = "none"
+
+        return {"photos": photos, "quality": quality}
+
     def save_embedding(self, roll_no: str, embedding: np.ndarray) -> None:
         np.save(self._embed_path(roll_no), embedding.astype(np.float32))
+        invalidate_gallery()
 
     def load_embedding(self, roll_no: str) -> Optional[np.ndarray]:
         path = self._embed_path(roll_no)
@@ -113,6 +172,7 @@ class FaceRecognizer:
         path = self._embed_path(roll_no)
         if path.exists():
             path.unlink()
+        invalidate_gallery()
 
     def match_against_all(
         self,
@@ -123,8 +183,12 @@ class FaceRecognizer:
         best_roll: Optional[str] = None
         best_score = 0.0
 
+        # Use the cached gallery for the default store; fall back to per-file
+        # reads when a custom embeddings_dir is in use (e.g. training scripts).
+        gallery = load_gallery() if self.embeddings_dir == EMBED_DIR else None
+
         for roll in enrolled_rolls:
-            stored = self.load_embedding(roll)
+            stored = gallery.get(roll) if gallery is not None else self.load_embedding(roll)
             if stored is None:
                 continue
             score = _cosine_similarity(embedding, stored)
