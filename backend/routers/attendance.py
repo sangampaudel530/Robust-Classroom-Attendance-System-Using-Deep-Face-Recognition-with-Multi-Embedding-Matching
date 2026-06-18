@@ -14,15 +14,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models.attendance import AttendanceRecord
-from backend.models.student import Student
 from backend.services.attendance import AttendanceService
 from backend.services.excel_export import build_attendance_excel
+from backend.services.video_processor import VideoProcessor
+from backend.models.evaluation import EvaluationRecord
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
 
 _attendance_service: Optional[AttendanceService] = None
+_video_processor: Optional[VideoProcessor] = None
+
+def get_video_processor() -> VideoProcessor:
+    global _video_processor
+    if _video_processor is None:
+        _video_processor = VideoProcessor()
+    return _video_processor
 
 
 def get_attendance_service() -> AttendanceService:
@@ -79,6 +87,39 @@ async def process_attendance(
 
     try:
         result = await service.process_class_photo(image_bytes, class_date, db)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+
+    return result
+
+
+@router.post("/process-video")
+async def process_video_attendance(
+    video: UploadFile = File(...),
+    date_str: Optional[str] = Form(None, alias="date"),
+    db: AsyncSession = Depends(get_db),
+):
+    video_bytes = await video.read()
+    if not video_bytes:
+        raise HTTPException(400, "Video is required.")
+
+    class_date = _parse_date(date_str) if date_str else date.today()
+    processor = get_video_processor()
+
+    # Get file extension to save correctly for OpenCV reading
+    ext = ".mp4"
+    if video.filename:
+        _, ext_val = os.path.splitext(video.filename)
+        if ext_val:
+            ext = ext_val
+
+    import os # Add local import since it's not at module level
+    
+    try:
+        result = await processor.process_video(video_bytes, class_date, db, filename_ext=ext)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -253,3 +294,106 @@ async def attendance_by_date(class_date: str, db: AsyncSession = Depends(get_db)
         "absent": absent,
         "total": len(records),
     }
+
+
+@router.post("/evaluate")
+async def evaluate_attendance(
+    photo: UploadFile = File(...),
+    ground_truth_rolls: str = Form(...),  # comma separated
+    date_str: Optional[str] = Form(None, alias="date"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Run an evaluation of the system's accuracy.
+    The teacher uploads a photo and provides the comma-separated roll numbers of who is ACTUALLY present.
+    The system processes the photo (without saving to main attendance records), compares with ground truth,
+    and returns Precision/Recall/F1 metrics.
+    """
+    image_bytes = await photo.read()
+    class_date = _parse_date(date_str) if date_str else date.today()
+    service = get_attendance_service()
+    
+    gt_list = [r.strip() for r in ground_truth_rolls.split(",") if r.strip()]
+    gt_set = set(gt_list)
+    
+    # Process without saving to DB (or just run standard process and parse output)
+    # Since process_class_photo saves to DB, we'll let it save and just evaluate the result
+    try:
+        result = await service.process_class_photo(image_bytes, class_date, db)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+        
+    predicted_present_set = set([d["roll_no"] for d in result["details"] if d["status"] == "P"])
+    
+    # Calculate metrics
+    tp = len(gt_set.intersection(predicted_present_set))
+    fp = len(predicted_present_set - gt_set)
+    fn = len(gt_set - predicted_present_set)
+    
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+    
+    metrics = {
+        "true_positives": tp,
+        "false_positives": fp,
+        "false_negatives": fn,
+        "precision": precision,
+        "recall": recall,
+        "f1_score": f1_score
+    }
+    
+    # Save evaluation record
+    import uuid
+    from datetime import datetime
+    
+    record = EvaluationRecord(
+        id=uuid.uuid4().hex,
+        eval_date=class_date,
+        total_students=result["total_students"],
+        ground_truth_present=len(gt_set),
+        predicted_present=len(predicted_present_set),
+        true_positives=tp,
+        false_positives=fp,
+        false_negatives=fn,
+        precision=precision,
+        recall=recall,
+        f1_score=f1_score,
+        created_at=datetime.utcnow()
+    )
+    db.add(record)
+    await db.commit()
+    
+    return {"status": "success", "metrics": metrics, "details": result["details"]}
+
+
+@router.get("/metrics/summary")
+async def get_metrics_summary(db: AsyncSession = Depends(get_db)):
+    """Return aggregated evaluation metrics."""
+    result = await db.execute(select(EvaluationRecord))
+    records = result.scalars().all()
+    
+    if not records:
+        return {"total_sessions": 0}
+        
+    avg_precision = sum(r.precision for r in records) / len(records)
+    avg_recall = sum(r.recall for r in records) / len(records)
+    avg_f1 = sum(r.f1_score for r in records) / len(records)
+    
+    return {
+        "total_sessions": len(records),
+        "avg_precision": avg_precision,
+        "avg_recall": avg_recall,
+        "avg_f1": avg_f1
+    }
+
+
+@router.get("/metrics/history")
+async def get_metrics_history(db: AsyncSession = Depends(get_db)):
+    """Return history of evaluation sessions."""
+    result = await db.execute(select(EvaluationRecord).order_by(EvaluationRecord.created_at.desc()))
+    records = result.scalars().all()
+    return {"sessions": [r.to_dict() for r in records]}

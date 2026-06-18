@@ -2,10 +2,12 @@
 services/anti_spoof.py
 Liveness / anti-spoofing using the Silent-Face MiniFASNet ensemble (ONNX).
 
-Runs two pretrained MiniFASNet models (minivision-ai, Apache-2.0) via
-onnxruntime and combines them. Each model takes an 80x80 BGR crop in raw
-[0, 255] range, taken with a model-specific context scale around the face box,
-and outputs 3-class logits where class 1 = real. See models/anti_spoof/NOTICE.md.
+Key improvements:
+  - Configurable mode: disabled / advisory / enforce (via ANTI_SPOOF_MODE env var)
+  - Disabled by default for teacher-uploaded photos (teacher = trusted party)
+  - Raised minimum face size to 100px (below this, MiniFASNet can't judge reliably)
+  - Lower default threshold (0.35) to reduce false rejections
+  - Better logging for debugging
 """
 
 import logging
@@ -20,12 +22,19 @@ import onnxruntime as ort
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path(os.getenv("ANTI_SPOOF_MODEL_DIR", "models/anti_spoof"))
+
 # Minimum real-face probability (0-1) required to accept a face as live.
-DEFAULT_SPOOF_THRESHOLD = float(os.getenv("SPOOF_THRESHOLD", "0.5"))
-# Faces smaller than this (in pixels, min side) are too low-resolution for the
-# model to judge reliably; accept them as real to avoid penalising distant
-# students in classroom group photos.
-MIN_FACE_SIZE = int(os.getenv("SPOOF_MIN_FACE", "80"))
+DEFAULT_SPOOF_THRESHOLD = float(os.getenv("SPOOF_THRESHOLD", "0.35"))
+
+# Mode: "disabled" | "advisory" | "enforce"
+#   disabled  — always returns (True, 1.0); anti-spoofing is off
+#   advisory  — runs the check, logs warnings, but never blocks attendance
+#   enforce   — blocks faces classified as spoof from attendance
+ANTI_SPOOF_MODE = os.getenv("ANTI_SPOOF_MODE", "disabled").lower()
+
+# Faces smaller than this (pixels, min side) are too low-resolution for MiniFASNet.
+# Accept them as real to avoid penalising distant students in classroom photos.
+MIN_FACE_SIZE = int(os.getenv("SPOOF_MIN_FACE", "100"))
 
 
 def _parse_scale(model_name: str) -> Optional[float]:
@@ -95,10 +104,16 @@ class AntiSpoofing:
             DEFAULT_SPOOF_THRESHOLD if spoof_threshold is None else spoof_threshold
         )
         self.min_face_size = MIN_FACE_SIZE
+        self.mode = ANTI_SPOOF_MODE
         model_dir = Path(model_dir) if model_dir else MODEL_DIR
 
         # Each entry: (onnx session, crop scale, input_w, input_h)
         self.models: List[Tuple[ort.InferenceSession, Optional[float], int, int]] = []
+
+        if self.mode == "disabled":
+            logger.info("Anti-spoofing is DISABLED (ANTI_SPOOF_MODE=disabled).")
+            return
+
         if not model_dir.exists():
             logger.warning(
                 "Anti-spoof model dir %s not found; liveness check disabled.",
@@ -115,18 +130,23 @@ class AntiSpoofing:
                     self.models.append((sess, _parse_scale(path.name), in_w, in_h))
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Failed to load anti-spoof model %s: %s", path.name, exc)
+
         if self.models:
-            logger.info("Anti-spoofing ready (%d MiniFASNet models).", len(self.models))
+            logger.info(
+                "Anti-spoofing ready (%d models, mode=%s, threshold=%.2f).",
+                len(self.models), self.mode, self.spoof_threshold,
+            )
 
     def is_real(self, image: np.ndarray, bbox: list, is_group: bool = False) -> Tuple[bool, float]:
         """Return (is_real, real_probability) for the face at `bbox`.
 
-        `bbox` is [x1, y1, x2, y2] in `image` (the full original photo). The
-        `is_group` flag is accepted for backwards compatibility but no longer
-        bypasses the check — liveness runs on every cropped face.
+        `bbox` is [x1, y1, x2, y2] in `image` (the full original photo).
         """
+        # If mode is disabled, always pass
+        if self.mode == "disabled":
+            return True, 1.0
+
         if not self.models:
-            # No model available: fail open so attendance still works.
             return True, 1.0
 
         x1, y1, x2, y2 = [int(v) for v in bbox]
@@ -134,8 +154,12 @@ class AntiSpoofing:
         if face_w <= 0 or face_h <= 0:
             return False, 0.0
 
+        # Too small to judge — accept to avoid false rejections
         if min(face_w, face_h) < self.min_face_size:
-            # Too small to judge reliably; accept to avoid false rejections.
+            logger.debug(
+                "Face too small for anti-spoof (%dx%d < %dpx) — accepting.",
+                face_w, face_h, self.min_face_size,
+            )
             return True, 1.0
 
         bbox_xywh = [x1, y1, face_w, face_h]
@@ -147,12 +171,17 @@ class AntiSpoofing:
             combined += _softmax(logits[0].astype(np.float64))
 
         n = len(self.models)
-        real_score = float(combined[1] / n)  # class 1 == real; combined sums to n
+        real_score = float(combined[1] / n)  # class 1 == real
         is_real = real_score >= self.spoof_threshold
 
         logger.info(
-            "Spoof check | bbox=[%d,%d,%d,%d] (%dx%d) | real=%.3f thr=%.2f | %s",
+            "Spoof check | bbox=[%d,%d,%d,%d] (%dx%d) | real=%.3f thr=%.2f | %s | mode=%s",
             x1, y1, x2, y2, face_w, face_h, real_score,
-            self.spoof_threshold, "REAL" if is_real else "SPOOF",
+            self.spoof_threshold, "REAL" if is_real else "SPOOF", self.mode,
         )
+
+        # In advisory mode, always return True but log the score
+        if self.mode == "advisory":
+            return True, real_score
+
         return is_real, real_score

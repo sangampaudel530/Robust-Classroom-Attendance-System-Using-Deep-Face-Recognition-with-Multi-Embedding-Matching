@@ -103,8 +103,8 @@ async def enroll_student(
     if not embeddings:
         raise HTTPException(400, "No valid face detected in uploaded photos.")
 
-    processed = recognizer.enroll_from_embeddings(roll_no, embeddings)
-    invalidate_gallery()
+    processed = recognizer.add_embeddings(roll_no, embeddings) if existing else recognizer.enroll_from_embeddings(roll_no, embeddings)
+    # The recognizer handles gallery invalidation internally now.
 
     if existing:
         existing.name       = name
@@ -116,9 +116,9 @@ async def enroll_student(
     await db.commit()
     logger.info("Enrolled student %s (%d photos)", roll_no, processed)
 
-    quality = "good" if processed >= 5 else "fair" if processed >= 3 else "poor"
+    quality = recognizer.enrollment_quality(roll_no)["quality"]
     warning = (
-        f"Only {processed} photo(s) enrolled. For best accuracy, provide at least 3 photos "
+        f"Only {processed} photo(s) processed this time. For best accuracy, provide at least 5 photos "
         "(front, slight left, slight right). Re-enroll with more photos anytime."
         if processed < MIN_PHOTOS_WARN else None
     )
@@ -148,8 +148,9 @@ async def remove_student(
     if keep_history:
         student.is_active = False
         await db.commit()
-        recognizer.remove_embedding(roll_no)
-        invalidate_gallery()
+        # Do not remove embeddings for soft delete so they can still be recognized (optional)
+        # recognizer.remove_embedding(roll_no)
+        # invalidate_gallery()
         return {
             "roll_no": roll_no,
             "mode":    "soft_delete",
@@ -164,7 +165,7 @@ async def remove_student(
         shutil.rmtree(str(student_photo_dir), ignore_errors=True)
 
     recognizer.remove_embedding(roll_no)
-    invalidate_gallery()
+    # Gallery is invalidated by recognizer automatically now
 
     al_result  = await db.execute(
         select(ActiveLearningCandidate).where(ActiveLearningCandidate.suggested_roll_no == roll_no)
@@ -237,7 +238,7 @@ async def confirm_active_learning_candidate(
 
     recognizer = FaceRecognizer()
     recognizer.update_student_embedding(roll_no)
-    invalidate_gallery()
+    # Recognizer handles gallery invalidation
 
     src_emb = Path(candidate.embedding_path)
     if src_emb.exists():
