@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Face Attendance System</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<aside class="sidebar">
+  <div class="brand">
+    <i class="fa-solid fa-user-check brand-icon"></i>
+    <div>
+      <div class="brand-title">FaceAttend</div>
+      <div class="brand-sub">Attendance System</div>
+    </div>
+  </div>
+  <nav class="nav">
+    <a class="nav-item active" data-tab="dashboard" href="#">
+      <i class="fa-solid fa-gauge-high"></i> Dashboard
+    </a>
+    <a class="nav-item" data-tab="enroll" href="#">
+      <i class="fa-solid fa-user-plus"></i> Enroll Student
+    </a>
+    <a class="nav-item" data-tab="students" href="#">
+      <i class="fa-solid fa-users"></i> Manage Students
+    </a>
+    <a class="nav-item" data-tab="attendance" href="#">
+      <i class="fa-solid fa-camera"></i> Take Attendance
+    </a>
+    <a class="nav-item" data-tab="records" href="#">
+      <i class="fa-solid fa-table-list"></i> View Records
+    </a>
+    <a class="nav-item" data-tab="active-learning" href="#">
+      <i class="fa-solid fa-brain"></i> Active Learning
+    </a>
+    <a class="nav-item" data-tab="export" href="#">
+      <i class="fa-solid fa-file-excel"></i> Export Excel
+    </a>
+  </nav>
+  <div class="sidebar-footer">
+    <span id="clock"></span>
+  </div>
+</aside>
+
+<!-- MAIN CONTENT -->
+<main class="main">
+
+  <!-- ── DASHBOARD ─────────────────────────────────── -->
+  <section class="tab active" id="tab-dashboard">
+    <div class="page-header">
+      <h1>Dashboard</h1>
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <span class="badge" id="today-badge"></span>
+        <button class="btn btn-danger btn-sm" id="dashboard-reset-btn" style="display: none;">
+          <i class="fa-solid fa-rotate-left"></i> Reset Today's Attendance
+        </button>
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card blue">
+        <i class="fa-solid fa-users stat-icon"></i>
+        <div class="stat-value" id="stat-total">—</div>
+        <div class="stat-label">Total Students</div>
+      </div>
+      <div class="stat-card green">
+        <i class="fa-solid fa-circle-check stat-icon"></i>
+        <div class="stat-value" id="stat-present">—</div>
+        <div class="stat-label">Present Today</div>
+      </div>
+      <div class="stat-card red">
+        <i class="fa-solid fa-circle-xmark stat-icon"></i>
+        <div class="stat-value" id="stat-absent">—</div>
+        <div class="stat-label">Absent Today</div>
+      </div>
+      <div class="stat-card purple">
+        <i class="fa-solid fa-percent stat-icon"></i>
+        <div class="stat-value" id="stat-pct">—</div>
+        <div class="stat-label">Attendance %</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">Today's Attendance</div>
+      <div id="dashboard-table-wrap">
+        <p class="muted">No attendance recorded today yet.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── ENROLL STUDENT ─────────────────────────────────── -->
+  <section class="tab" id="tab-enroll">
+    <div class="page-header"><h1>Enroll Student</h1></div>
+
+    <div class="card" style="max-width:600px">
+      <div class="card-header">Student Details</div>
+
+      <div class="form-group">
+        <label>Roll Number <span class="req">*</span></label>
+        <input type="text" id="enroll-roll" placeholder="e.g. 2024CSE001"/>
+      </div>
+      <div class="form-group">
+        <label>Full Name <span class="req">*</span></label>
+        <input type="text" id="enroll-name" placeholder="e.g. Ravi Sharma"/>
+      </div>
+      <div class="form-group">
+        <label>Face Photos (1–10 photos) <span class="req">*</span></label>
+        <p class="hint">For best accuracy: include frontal, slight left, slight right angles. Include with glasses if worn.</p>
+        <div class="upload-zone" id="enroll-upload-zone">
+          <i class="fa-solid fa-cloud-arrow-up upload-icon"></i>
+          <p>Click to select or drag photos here</p>
+          <input type="file" id="enroll-photos" accept="image/*" multiple hidden/>
+        </div>
+        <div class="photo-preview" id="enroll-preview"></div>
+      </div>
+
+      <button class="btn btn-primary" id="enroll-btn">
+        <i class="fa-solid fa-user-plus"></i> Enroll Student
+      </button>
+      <div id="enroll-result" class="result-box" style="display:none"></div>
+    </div>
+  </section>
+
+  <!-- ── MANAGE STUDENTS ─────────────────────────────────── -->
+  <section class="tab" id="tab-students">
+    <div class="page-header">
+      <h1>Manage Students</h1>
+      <button class="btn btn-primary btn-sm" onclick="loadStudents()">
+        <i class="fa-solid fa-rotate"></i> Refresh
+      </button>
+    </div>
+
+    <div class="card">
+      <div class="search-bar">
+        <i class="fa-solid fa-magnifying-glass"></i>
+        <input type="text" id="student-search" placeholder="Search by roll no or name..."/>
+      </div>
+      <div id="students-table-wrap"><p class="muted">Loading...</p></div>
+    </div>
+  </section>
+
+  <!-- ── TAKE ATTENDANCE ─────────────────────────────────── -->
+  <section class="tab" id="tab-attendance">
+    <div class="page-header"><h1>Take Attendance</h1></div>
+
+    <div class="card" style="max-width:640px">
+      <div class="card-header">Upload Class Photo</div>
+
+      <div class="form-group">
+        <label>Attendance Date</label>
+        <input type="date" id="att-date"/>
+      </div>
+
+      <div class="upload-zone large" id="att-upload-zone">
+        <i class="fa-solid fa-camera upload-icon"></i>
+        <p>Upload the class group photo</p>
+        <p class="hint">Supports JPG / PNG up to 20 MB</p>
+        <input type="file" id="att-photo" accept="image/*" hidden/>
+      </div>
+      <div id="att-preview-wrap" style="display:none">
+        <img id="att-preview-img" class="preview-img" alt="Class photo preview"/>
+      </div>
+
+      <div class="att-action-buttons">
+        <button class="btn btn-primary" id="att-process-btn">
+          <i class="fa-solid fa-wand-magic-sparkles"></i> Process Attendance
+        </button>
+        <button class="btn btn-ghost" id="att-clear-btn" style="display:none">
+          <i class="fa-solid fa-rotate-right"></i> Clear & Retake Photo
+        </button>
+      </div>
+
+      <div id="att-spinner" class="spinner-wrap" style="display:none">
+        <div class="spinner"></div>
+        <p>Detecting and recognizing faces… please wait</p>
+      </div>
+
+      <div id="att-result" style="display:none">
+        <div class="att-summary-grid">
+          <div class="att-stat green"><span id="r-present">0</span><small>Present</small></div>
+          <div class="att-stat red"><span id="r-absent">0</span><small>Absent</small></div>
+          <div class="att-stat blue"><span id="r-detected">0</span><small>Faces Detected</small></div>
+          <div class="att-stat orange"><span id="r-spoofs">0</span><small>Spoofs Rejected</small></div>
+        </div>
+        <div id="att-details-wrap"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── VIEW RECORDS ─────────────────────────────────── -->
+  <section class="tab" id="tab-records">
+    <div class="page-header"><h1>Attendance Records</h1></div>
+
+    <div class="card">
+      <div class="records-toolbar">
+        <div class="form-group inline">
+          <label>Date</label>
+          <input type="date" id="records-date"/>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="loadRecords()">
+          <i class="fa-solid fa-search"></i> View
+        </button>
+      </div>
+      <div id="records-wrap"><p class="muted">Select a date to view attendance.</p></div>
+    </div>
+  </section>
+
+  <!-- ── EXPORT EXCEL ─────────────────────────────────── -->
+  <section class="tab" id="tab-export">
+    <div class="page-header"><h1>Export to Excel</h1></div>
+
+    <div class="card" style="max-width:520px">
+      <div class="card-header">Generate Attendance Report</div>
+      <p class="hint" style="margin-bottom:1.5rem">
+        Export a styled Excel sheet with all students, dates, P/A status, and summary statistics.
+      </p>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>From Date (optional)</label>
+          <input type="date" id="export-start"/>
+        </div>
+        <div class="form-group">
+          <label>To Date (optional)</label>
+          <input type="date" id="export-end"/>
+        </div>
+      </div>
+
+      <div class="export-info">
+        <i class="fa-solid fa-circle-info"></i>
+        The Excel file contains two sheets:
+        <ul>
+          <li><strong>Attendance</strong> — Roll No | Name | P/A per date (color coded)</li>
+          <li><strong>Summary</strong> — Per-student attendance percentage</li>
+        </ul>
+      </div>
+
+      <button class="btn btn-success" id="export-btn">
+        <i class="fa-solid fa-file-excel"></i> Download Excel Report
+      </button>
+    </div>
+  </section>
+
+  <!-- ── ACTIVE LEARNING ─────────────────────────────────── -->
+  <section class="tab" id="tab-active-learning">
+    <div class="page-header">
+      <h1>Active Learning (AI Model Training)</h1>
+      <button class="btn btn-primary btn-sm" onclick="loadActiveLearningCandidates()">
+        <i class="fa-solid fa-rotate"></i> Refresh
+      </button>
+    </div>
+
+    <div class="card">
+      <div class="card-header">Unrecognized Face Candidates from Class Photos</div>
+      <p class="hint" style="margin-bottom:1.5rem">
+        These faces were detected in classroom photos but did not match any enrolled student with high confidence.
+        By identifying and confirming who they are, you add their actual classroom appearance to their face database to incrementally improve the model's recognition capability.
+      </p>
+
+      <div id="al-candidates-wrap">
+        <p class="muted">Loading candidates...</p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- TOAST -->
+<div id="toast" class="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
