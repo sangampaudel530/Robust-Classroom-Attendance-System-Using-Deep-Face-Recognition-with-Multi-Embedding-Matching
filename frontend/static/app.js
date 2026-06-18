@@ -336,6 +336,7 @@ async function processAttendance() {
 // ── Video Attendance (NEW) ─────────────────────────────────────────
 function initVideo() {
   const zone  = $("#vid-upload-zone"), input = $("#vid-file");
+  if (!zone || !input) return;
   zone.addEventListener("click", () => input.click());
   zone.addEventListener("dragover", e => { e.preventDefault(); zone.classList.add("drag-over"); });
   zone.addEventListener("dragleave", () => zone.classList.remove("drag-over"));
@@ -500,6 +501,7 @@ async function rejectCandidate(id) {
 // ── Metrics (NEW) ─────────────────────────────────────────────────
 function initMetrics() {
   const zone = $("#eval-upload-zone"), input = $("#eval-photo");
+  if (!zone || !input) return;
   zone.addEventListener("click", () => input.click());
   input.addEventListener("change", () => {
     if (input.files[0]) zone.innerHTML = `<i class="fa-solid fa-circle-check" style="color:var(--green);font-size:24px"></i><p style="color:var(--green)">Photo selected: ${input.files[0].name}</p>`;
