@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 EMBED_DIR = Path(os.getenv("EMBED_DIR") or os.getenv("EMBEDDINGS_DIR") or "data/embeddings")
 EMBED_DIR.mkdir(parents=True, exist_ok=True)
 
+PHOTO_DIR = Path(os.getenv("PHOTO_DIR") or os.getenv("STUDENT_PHOTOS_DIR") or "data/student_photos")
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+
 _shared_app = None
 
 # In-memory cache of {roll_no: embedding} loaded from EMBED_DIR.
@@ -85,6 +89,31 @@ class FaceRecognizer:
 
     def _embed_path(self, roll_no: str) -> Path:
         return self.embeddings_dir / f"{roll_no}.npy"
+
+    def enrollment_quality(self, roll_no: str) -> dict:
+        """Report how many enrollment photos a student has and a quality label.
+
+        good >= 5 photos, fair >= 3, otherwise poor (none if no photos).
+        """
+        student_dir = PHOTO_DIR / roll_no
+        if student_dir.exists():
+            photos = sum(
+                1 for f in student_dir.iterdir()
+                if f.is_file() and f.suffix.lower() in IMAGE_SUFFIXES
+            )
+        else:
+            photos = 0
+
+        if photos >= 5:
+            quality = "good"
+        elif photos >= 3:
+            quality = "fair"
+        elif photos >= 1:
+            quality = "poor"
+        else:
+            quality = "none"
+
+        return {"photos": photos, "quality": quality}
 
     def save_embedding(self, roll_no: str, embedding: np.ndarray) -> None:
         np.save(self._embed_path(roll_no), embedding.astype(np.float32))
