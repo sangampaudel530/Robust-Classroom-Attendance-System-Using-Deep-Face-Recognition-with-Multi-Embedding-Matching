@@ -27,7 +27,11 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_DIR      = Path(os.getenv("UPLOAD_DIR", "data/uploads"))
 MATCH_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", "0.45"))
-SPOOF_THRESHOLD = float(os.getenv("SPOOF_THRESHOLD", "0.55"))
+# When true, faces failing the liveness check are excluded from attendance.
+# When false, they are still counted (advisory mode) but reported in
+# `spoofs_rejected` so a misfiring model can't silently mark a real student
+# absent. Defaults to enforcing.
+SPOOF_ENFORCE   = os.getenv("SPOOF_ENFORCE", "true").lower() not in ("0", "false", "no")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -38,7 +42,7 @@ class AttendanceService:
         shared = get_shared_app()
         self.detector   = FaceDetector(app=shared)
         self.recognizer = FaceRecognizer()
-        self.anti_spoof = AntiSpoofing(spoof_threshold=SPOOF_THRESHOLD)
+        self.anti_spoof = AntiSpoofing()
 
     async def process_class_photo(
         self,
@@ -81,12 +85,16 @@ class AttendanceService:
             bbox      = face_data["bbox"]
             face_crop = face_data["face_crop"]
 
-            # Anti-spoof (bypass for classroom photos)
-            is_real, spoof_score = self.anti_spoof.is_real(image, bbox, is_group=True)
+            # Liveness check on every detected face (no group bypass)
+            is_real, spoof_score = self.anti_spoof.is_real(image, bbox)
             if not is_real:
                 spoofs_rejected += 1
-                logger.warning(f"Spoof rejected (score={spoof_score:.2f})")
-                continue
+                if SPOOF_ENFORCE:
+                    logger.warning(f"Spoof rejected (score={spoof_score:.2f})")
+                    continue
+                logger.warning(
+                    f"Spoof flagged but counted (advisory mode, score={spoof_score:.2f})"
+                )
 
             # Use pre-computed embedding from detector if available, else compute
             embedding = face_data.get("embedding")
