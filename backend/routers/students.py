@@ -29,6 +29,9 @@ from backend.models.student import Student
 from backend.services.face_detector import FaceDetector
 from backend.services.recognizer import FaceRecognizer, get_shared_app, invalidate_gallery
 
+AL_DIR = Path("data/active_learning")
+AL_DIR.mkdir(parents=True, exist_ok=True)
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/students", tags=["students"])
 
@@ -167,17 +170,6 @@ async def remove_student(
     recognizer.remove_embedding(roll_no)
     # Gallery is invalidated by recognizer automatically now
 
-    al_result  = await db.execute(
-        select(ActiveLearningCandidate).where(ActiveLearningCandidate.suggested_roll_no == roll_no)
-    )
-    al_cands   = al_result.scalars().all()
-    for cand in al_cands:
-        for fpath in (cand.face_crop_path, cand.embedding_path):
-            p = Path(fpath)
-            if p.exists():
-                p.unlink(missing_ok=True)
-        await db.delete(cand)
-
     att_result = await db.execute(
         select(AttendanceRecord).where(AttendanceRecord.roll_no == roll_no)
     )
@@ -195,63 +187,58 @@ async def remove_student(
         "message":                    f"Student {roll_no} permanently deleted.",
         "photos_deleted":             photos_deleted,
         "attendance_records_deleted": records_deleted,
-        "al_candidates_deleted":      len(al_cands),
     }
 
 
+# ── Active Learning ────────────────────────────────────────────────────────
+
 @router.get("/active-learning/candidates")
-async def list_active_learning_candidates(db: AsyncSession = Depends(get_db)):
+async def get_active_learning_candidates(db: AsyncSession = Depends(get_db)):
+    """Return all pending unrecognized face candidates."""
     result = await db.execute(
         select(ActiveLearningCandidate).order_by(ActiveLearningCandidate.created_at.desc())
     )
     candidates = result.scalars().all()
-    student_results = await db.execute(select(Student))
-    student_map = {s.roll_no: s.name for s in student_results.scalars().all()}
-    res = []
-    for c in candidates:
-        d = c.to_dict()
-        d["suggested_name"] = student_map.get(c.suggested_roll_no, "—") if c.suggested_roll_no else "—"
-        res.append(d)
-    return {"candidates": res, "total": len(res)}
+    return {"candidates": [c.to_dict() for c in candidates]}
 
 
 @router.post("/active-learning/confirm")
 async def confirm_active_learning_candidate(
     candidate_id: str = Form(...),
-    roll_no:      str = Form(...),
+    roll_no:       str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
+    """Assign an unrecognized face to a student, add it to their gallery, and delete the candidate."""
     candidate = await db.get(ActiveLearningCandidate, candidate_id)
     if not candidate:
         raise HTTPException(404, "Candidate not found.")
+
     student = await db.get(Student, roll_no)
-    if not student or not student.is_active:
+    if not student:
         raise HTTPException(404, f"Student {roll_no} not found.")
 
-    student_dir = PHOTO_DIR / roll_no
-    student_dir.mkdir(parents=True, exist_ok=True)
+    # Move the face crop into the student's official photo directory
+    src = Path(candidate.face_crop_path)
+    if not src.exists():
+        raise HTTPException(404, "Face crop image file not found on disk.")
 
-    src_crop = Path(candidate.face_crop_path)
-    dest_crop = student_dir / f"crop_al_{uuid.uuid4().hex[:8]}.jpg"
-    if src_crop.exists():
-        shutil.move(str(src_crop), str(dest_crop))
+    dest_dir = PHOTO_DIR / roll_no
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"al_{candidate_id[:8]}.jpg"
+    shutil.copy2(str(src), str(dest))
+    src.unlink(missing_ok=True)  # clean up AL file
 
+    # Re-compute embeddings for this student to include the new photo
     recognizer = FaceRecognizer()
     recognizer.update_student_embedding(roll_no)
-    # Recognizer handles gallery invalidation
+    invalidate_gallery()
 
-    src_emb = Path(candidate.embedding_path)
-    if src_emb.exists():
-        src_emb.unlink()
-
+    # Delete the candidate record
     await db.delete(candidate)
     await db.commit()
 
-    return {
-        "message":      "Candidate confirmed and student model updated.",
-        "roll_no":      roll_no,
-        "candidate_id": candidate_id,
-    }
+    logger.info("Active learning: confirmed candidate %s as student %s.", candidate_id, roll_no)
+    return {"message": f"Face confirmed as {student.name} and model updated."}
 
 
 @router.post("/active-learning/reject")
@@ -259,13 +246,18 @@ async def reject_active_learning_candidate(
     candidate_id: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
+    """Dismiss an unrecognized face candidate without training."""
     candidate = await db.get(ActiveLearningCandidate, candidate_id)
     if not candidate:
         raise HTTPException(404, "Candidate not found.")
-    for fpath in (candidate.face_crop_path, candidate.embedding_path):
-        p = Path(fpath)
-        if p.exists():
-            p.unlink()
+
+    # Delete the face crop file
+    crop = Path(candidate.face_crop_path)
+    if crop.exists():
+        crop.unlink(missing_ok=True)
+
     await db.delete(candidate)
     await db.commit()
-    return {"message": "Candidate rejected.", "candidate_id": candidate_id}
+
+    logger.info("Active learning: rejected candidate %s.", candidate_id)
+    return {"message": "Candidate dismissed."}

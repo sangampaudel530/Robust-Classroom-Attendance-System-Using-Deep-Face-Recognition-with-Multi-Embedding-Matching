@@ -28,20 +28,17 @@
     <a class="nav-item" data-tab="students" href="#">
       <i class="fa-solid fa-users"></i> Manage Students
     </a>
-    <a class="nav-item" data-tab="attendance" href="#">
-      <i class="fa-solid fa-camera"></i> Take Attendance
-    </a>
     <a class="nav-item" data-tab="records" href="#">
-      <i class="fa-solid fa-table-list"></i> View Records
-    </a>
-    <a class="nav-item" data-tab="active-learning" href="#">
-      <i class="fa-solid fa-brain"></i> Active Learning
+      <i class="fa-solid fa-calendar-days"></i> Attendance Records
     </a>
     <a class="nav-item" data-tab="video" href="#">
-      <i class="fa-solid fa-video"></i> Video Attendance
+      <i class="fa-solid fa-video"></i> Take Attendance (Video)
     </a>
     <a class="nav-item" data-tab="metrics" href="#">
       <i class="fa-solid fa-chart-line"></i> Evaluation Metrics
+    </a>
+    <a class="nav-item" data-tab="active-learning" href="#">
+      <i class="fa-solid fa-brain"></i> Active Learning
     </a>
     <a class="nav-item" data-tab="export" href="#">
       <i class="fa-solid fa-file-excel"></i> Export Excel
@@ -149,54 +146,6 @@
     </div>
   </section>
 
-  <!-- ── TAKE ATTENDANCE ─────────────────────────────────── -->
-  <section class="tab" id="tab-attendance">
-    <div class="page-header"><h1>Take Attendance</h1></div>
-
-    <div class="card" style="max-width:640px">
-      <div class="card-header">Upload Class Photo</div>
-
-      <div class="form-group">
-        <label>Attendance Date</label>
-        <input type="date" id="att-date"/>
-      </div>
-
-      <div class="upload-zone large" id="att-upload-zone">
-        <i class="fa-solid fa-camera upload-icon"></i>
-        <p>Upload the class group photo</p>
-        <p class="hint">Supports JPG / PNG up to 20 MB</p>
-        <input type="file" id="att-photo" accept="image/*" hidden/>
-      </div>
-      <div id="att-preview-wrap" style="display:none">
-        <img id="att-preview-img" class="preview-img" alt="Class photo preview"/>
-      </div>
-
-      <div class="att-action-buttons">
-        <button class="btn btn-primary" id="att-process-btn">
-          <i class="fa-solid fa-wand-magic-sparkles"></i> Process Attendance
-        </button>
-        <button class="btn btn-ghost" id="att-clear-btn" style="display:none">
-          <i class="fa-solid fa-rotate-right"></i> Clear & Retake Photo
-        </button>
-      </div>
-
-      <div id="att-spinner" class="spinner-wrap" style="display:none">
-        <div class="spinner"></div>
-        <p>Detecting and recognizing faces… please wait</p>
-      </div>
-
-      <div id="att-result" style="display:none">
-        <div class="att-summary-grid">
-          <div class="att-stat green"><span id="r-present">0</span><small>Present</small></div>
-          <div class="att-stat red"><span id="r-absent">0</span><small>Absent</small></div>
-          <div class="att-stat blue"><span id="r-detected">0</span><small>Faces Detected</small></div>
-          <div class="att-stat orange"><span id="r-spoofs">0</span><small>Spoofs Rejected</small></div>
-        </div>
-        <div id="att-details-wrap"></div>
-      </div>
-    </div>
-  </section>
-
   <!-- ── VIEW RECORDS ─────────────────────────────────── -->
   <section class="tab" id="tab-records">
     <div class="page-header"><h1>Attendance Records</h1></div>
@@ -292,8 +241,8 @@
         <i class="fa-solid fa-video upload-icon"></i>
         <p>Upload a short classroom video (10-15 seconds)</p>
         <p class="hint">Supports MP4 / AVI / MOV</p>
-        <input type="file" id="vid-file" accept="video/*" hidden/>
       </div>
+      <input type="file" id="vid-file" accept="video/mp4,video/x-m4v,video/*" style="display:none;"/>
       <div id="vid-filename" class="result-box success" style="display:none; margin-top:1rem; margin-bottom:1rem; font-weight:bold;"></div>
 
       <div class="att-action-buttons">
@@ -310,12 +259,15 @@
         <p>Extracting frames and processing faces… please wait</p>
       </div>
 
+      <img id="vid-preview-img" style="display:none; max-width:100%; border-radius:8px; margin-top:1rem; border:1px solid var(--border);" />
+
       <div id="vid-result" style="display:none; margin-top: 2rem;">
         <div class="att-summary-grid">
           <div class="att-stat green"><span id="vr-present">0</span><small>Present</small></div>
           <div class="att-stat red"><span id="vr-absent">0</span><small>Absent</small></div>
           <div class="att-stat blue"><span id="vr-frames">0</span><small>Frames</small></div>
           <div class="att-stat purple"><span id="vr-faces">0</span><small>Faces</small></div>
+          <div class="att-stat orange"><span id="vr-spoofs">0</span><small>Spoofs</small></div>
         </div>
         <div id="vid-details-wrap"></div>
       </div>
@@ -337,7 +289,7 @@
     <div class="card" style="max-width:800px; margin-bottom: 2rem;">
       <div class="card-header">Run New Evaluation</div>
       <p class="hint" style="margin-bottom:1rem">
-        Upload a class photo and enter the roll numbers of the students who are ACTUALLY present in the photo.
+        Upload a class video and enter the roll numbers of the students who are ACTUALLY present in the video.
         The system will evaluate its accuracy (Precision, Recall, F1) against this ground truth.
       </p>
 
@@ -351,15 +303,16 @@
       <div class="form-group">
         <label>Ground Truth (Present Students)</label>
         <input type="text" id="eval-ground-truth" placeholder="Comma separated: 080bct068,080bct073..." />
-        <p class="hint">Enter the roll numbers of everyone visibly present in the photo.</p>
+        <p class="hint">Enter the roll numbers of everyone visibly present in the video.</p>
       </div>
 
       <div class="form-group">
         <div class="upload-zone" id="eval-upload-zone" style="min-height: 100px;">
-          <i class="fa-solid fa-image upload-icon"></i>
-          <p>Click to select classroom photo</p>
-          <input type="file" id="eval-photo" accept="image/*" hidden/>
+          <i class="fa-solid fa-video upload-icon"></i>
+          <p>Click to select classroom video</p>
         </div>
+        <input type="file" id="eval-video" accept="video/mp4,video/x-m4v,video/*" style="display:none;"/>
+        <div id="eval-filename" class="result-box success" style="display:none; margin-top:1rem; margin-bottom:1rem; font-weight:bold;"></div>
       </div>
 
       <button class="btn btn-primary" id="eval-btn">
@@ -387,6 +340,6 @@
 <!-- TOAST -->
 <div id="toast" class="toast"></div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=2"></script>
 </body>
 </html>

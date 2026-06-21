@@ -122,9 +122,8 @@ class AntiSpoofing:
         else:
             for path in sorted(model_dir.glob("*.onnx")):
                 try:
-                    sess = ort.InferenceSession(
-                        str(path), providers=["CPUExecutionProvider"]
-                    )
+                    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "CUDAExecutionProvider" in ort.get_available_providers() else ["CPUExecutionProvider"]
+                    sess = ort.InferenceSession(str(path), providers=providers)
                     shape = sess.get_inputs()[0].shape  # [1, 3, H, W]
                     in_h, in_w = int(shape[2]), int(shape[3])
                     self.models.append((sess, _parse_scale(path.name), in_w, in_h))
