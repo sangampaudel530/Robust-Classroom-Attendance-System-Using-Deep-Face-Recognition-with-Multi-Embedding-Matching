@@ -153,13 +153,9 @@ class AntiSpoofing:
         if face_w <= 0 or face_h <= 0:
             return False, 0.0
 
-        # Too small to judge — accept to avoid false rejections
-        if min(face_w, face_h) < self.min_face_size:
-            logger.debug(
-                "Face too small for anti-spoof (%dx%d < %dpx) — accepting.",
-                face_w, face_h, self.min_face_size,
-            )
-            return True, 1.0
+        # We previously auto-accepted faces < min_face_size, but this created a security hole
+        # where students could hold a small photo far away.
+        # Now we ALWAYS run the anti-spoof model. The model will just upscale the crop.
 
         bbox_xywh = [x1, y1, face_w, face_h]
         combined = np.zeros(3, dtype=np.float64)
