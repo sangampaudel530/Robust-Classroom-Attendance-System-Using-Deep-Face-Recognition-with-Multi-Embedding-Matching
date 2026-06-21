@@ -134,8 +134,10 @@ def get_shared_app():
     if _shared_app is None:
         from insightface.app import FaceAnalysis
 
-        _shared_app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-        _shared_app.prepare(ctx_id=-1, det_size=(640, 640))
+        _shared_app = FaceAnalysis(name="buffalo_l")
+        import onnxruntime as ort
+        ctx_id = 0 if "CUDAExecutionProvider" in ort.get_available_providers() else -1
+        _shared_app.prepare(ctx_id=ctx_id, det_size=(640, 640))
         logger.info("InsightFace model loaded.")
     return _shared_app
 

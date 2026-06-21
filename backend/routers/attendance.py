@@ -4,7 +4,9 @@ Attendance processing and record endpoints.
 """
 
 import logging
+import uuid
 from datetime import date, datetime
+import json
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -14,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models.attendance import AttendanceRecord
-from backend.services.attendance import AttendanceService
+from backend.models.student import Student
 from backend.services.excel_export import build_attendance_excel
 from backend.services.video_processor import VideoProcessor
 from backend.models.evaluation import EvaluationRecord
@@ -23,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
 
-_attendance_service: Optional[AttendanceService] = None
 _video_processor: Optional[VideoProcessor] = None
 
 def get_video_processor() -> VideoProcessor:
@@ -31,13 +32,6 @@ def get_video_processor() -> VideoProcessor:
     if _video_processor is None:
         _video_processor = VideoProcessor()
     return _video_processor
-
-
-def get_attendance_service() -> AttendanceService:
-    global _attendance_service
-    if _attendance_service is None:
-        _attendance_service = AttendanceService()
-    return _attendance_service
 
 
 def _parse_date(value: str) -> date:
@@ -71,31 +65,6 @@ async def _records_with_names(class_date: date, db: AsyncSession, active_only: b
         records.append(row)
     return records
 
-
-@router.post("/process")
-async def process_attendance(
-    photo: UploadFile = File(...),
-    date_str: Optional[str] = Form(None, alias="date"),
-    db: AsyncSession = Depends(get_db),
-):
-    image_bytes = await photo.read()
-    if not image_bytes:
-        raise HTTPException(400, "Photo is required.")
-
-    class_date = _parse_date(date_str) if date_str else date.today()
-    service = get_attendance_service()
-
-    try:
-        result = await service.process_class_photo(image_bytes, class_date, db)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-
-    if "error" in result:
-        raise HTTPException(400, result["error"])
-
-    return result
-
-
 @router.post("/process-video")
 async def process_video_attendance(
     video: UploadFile = File(...),
@@ -109,24 +78,24 @@ async def process_video_attendance(
     class_date = _parse_date(date_str) if date_str else date.today()
     processor = get_video_processor()
 
-    # Get file extension to save correctly for OpenCV reading
+    import os
     ext = ".mp4"
     if video.filename:
         _, ext_val = os.path.splitext(video.filename)
         if ext_val:
             ext = ext_val
-
-    import os # Add local import since it's not at module level
     
     try:
-        result = await processor.process_video(video_bytes, class_date, db, filename_ext=ext)
-    except ValueError as exc:
+        async def event_generator():
+            try:
+                async for event in processor.process_video(video_bytes, class_date, db, filename_ext=ext):
+                    yield json.dumps(event) + "\n"
+            except Exception as exc:
+                yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
+                
+        return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+    except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
-
-    if "error" in result:
-        raise HTTPException(400, result["error"])
-
-    return result
 
 
 @router.get("/export/excel")
@@ -153,8 +122,12 @@ async def student_attendance(roll_no: str, db: AsyncSession = Depends(get_db)):
     if not student:
         raise HTTPException(404, f"Student {roll_no} not found.")
 
-    service = get_attendance_service()
-    records = await service.get_student_attendance(roll_no, db)
+    result = await db.execute(
+        select(AttendanceRecord)
+        .where(AttendanceRecord.roll_no == roll_no)
+        .order_by(AttendanceRecord.date)
+    )
+    records = [r.to_dict() for r in result.scalars().all()]
 
     for row in records:
         row["name"] = student.name
@@ -205,7 +178,6 @@ async def reset_attendance_for_date(
     """
     Delete ALL attendance records for a given date.
     Used when the user wants to clear and re-process from scratch.
-    Also cleans up any Active Learning candidates generated for that date.
     """
     parsed_date = _parse_date(class_date)
 
@@ -218,34 +190,15 @@ async def reset_attendance_for_date(
     for rec in att_records:
         await db.delete(rec)
 
-    # Also clean up Active Learning candidates from that date
-    from backend.models.active_learning import ActiveLearningCandidate
-    from pathlib import Path
-
-    al_result = await db.execute(
-        select(ActiveLearningCandidate).where(
-            ActiveLearningCandidate.class_date == parsed_date
-        )
-    )
-    al_candidates = al_result.scalars().all()
-    al_deleted = len(al_candidates)
-    for cand in al_candidates:
-        for fpath in (cand.face_crop_path, cand.embedding_path):
-            p = Path(fpath)
-            if p.exists():
-                p.unlink(missing_ok=True)
-        await db.delete(cand)
-
     await db.commit()
 
     logger.info(
-        "Reset attendance for %s — %d records deleted, %d AL candidates removed.",
-        parsed_date, records_deleted, al_deleted,
+        "Reset attendance for %s — %d records deleted.",
+        parsed_date, records_deleted,
     )
     return {
         "date": str(parsed_date),
         "records_deleted": records_deleted,
-        "al_candidates_deleted": al_deleted,
         "message": f"Attendance for {parsed_date} has been reset.",
     }
 
@@ -279,52 +232,48 @@ async def cleanup_orphaned_records(db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.get("/{class_date}")
-async def attendance_by_date(class_date: str, db: AsyncSession = Depends(get_db)):
-    parsed_date = _parse_date(class_date)
-    records = await _records_with_names(parsed_date, db)
-
-    present = sum(1 for r in records if r["status"] == "P")
-    absent = sum(1 for r in records if r["status"] == "A")
-
-    return {
-        "date": str(parsed_date),
-        "records": records,
-        "present": present,
-        "absent": absent,
-        "total": len(records),
-    }
-
 
 @router.post("/evaluate")
 async def evaluate_attendance(
-    photo: UploadFile = File(...),
+    video: UploadFile = File(...),
     ground_truth_rolls: str = Form(...),  # comma separated
     date_str: Optional[str] = Form(None, alias="date"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Run an evaluation of the system's accuracy.
-    The teacher uploads a photo and provides the comma-separated roll numbers of who is ACTUALLY present.
-    The system processes the photo (without saving to main attendance records), compares with ground truth,
+    The teacher uploads a video and provides the comma-separated roll numbers of who is ACTUALLY present.
+    The system processes the video (without saving to main attendance records), compares with ground truth,
     and returns Precision/Recall/F1 metrics.
     """
-    image_bytes = await photo.read()
+    import os
+    video_bytes = await video.read()
+    if not video_bytes:
+        raise HTTPException(400, "Video is required.")
+
     class_date = _parse_date(date_str) if date_str else date.today()
-    service = get_attendance_service()
+    processor = get_video_processor()
+
+    ext = ".mp4"
+    if video.filename:
+        _, ext_val = os.path.splitext(video.filename)
+        if ext_val:
+            ext = ext_val
     
     gt_list = [r.strip() for r in ground_truth_rolls.split(",") if r.strip()]
     gt_set = set(gt_list)
     
-    # Process without saving to DB (or just run standard process and parse output)
-    # Since process_class_photo saves to DB, we'll let it save and just evaluate the result
     try:
-        result = await service.process_class_photo(image_bytes, class_date, db)
+        result = None
+        async for event in processor.process_video(video_bytes, class_date, db, filename_ext=ext):
+            if event["type"] == "result":
+                result = event["data"]
+            elif event["type"] == "error":
+                raise ValueError(event["message"])
+        if result is None:
+            raise ValueError("No result returned from video processor")
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-
-    if "error" in result:
-        raise HTTPException(400, result["error"])
         
     predicted_present_set = set([d["roll_no"] for d in result["details"] if d["status"] == "P"])
     
@@ -347,9 +296,6 @@ async def evaluate_attendance(
     }
     
     # Save evaluation record
-    import uuid
-    from datetime import datetime
-    
     record = EvaluationRecord(
         id=uuid.uuid4().hex,
         eval_date=class_date,
@@ -397,3 +343,20 @@ async def get_metrics_history(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(EvaluationRecord).order_by(EvaluationRecord.created_at.desc()))
     records = result.scalars().all()
     return {"sessions": [r.to_dict() for r in records]}
+
+
+@router.get("/{class_date}")
+async def attendance_by_date(class_date: str, db: AsyncSession = Depends(get_db)):
+    parsed_date = _parse_date(class_date)
+    records = await _records_with_names(parsed_date, db)
+
+    present = sum(1 for r in records if r["status"] == "P")
+    absent = sum(1 for r in records if r["status"] == "A")
+
+    return {
+        "date": str(parsed_date),
+        "records": records,
+        "present": present,
+        "absent": absent,
+        "total": len(records),
+    }

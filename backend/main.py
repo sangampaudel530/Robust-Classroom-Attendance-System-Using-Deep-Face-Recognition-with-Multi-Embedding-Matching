@@ -22,6 +22,7 @@ import backend.models.attendance  # noqa: F401
 import backend.models.student  # noqa: F401
 import backend.models.active_learning  # noqa: F401
 
+
 load_dotenv()
 logging.basicConfig(
     level=logging.INFO,

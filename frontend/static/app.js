@@ -16,7 +16,9 @@ function toast(msg, type = "") {
 }
 
 function fmtDate(d) {
-  return new Date(d + "T00:00:00").toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+  if (!d) return "—";
+  const dateStr = d.includes("T") ? d : d + "T00:00:00";
+  return new Date(dateStr).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 
 async function api(path, opts = {}) {
@@ -60,7 +62,6 @@ function switchTab(name) { $(`.nav-item[data-tab="${name}"]`).click(); }
 async function loadDashboard() {
   const today = todayStr();
   $("#today-badge").textContent = fmtDate(today);
-  if ($("#att-date")) $("#att-date").value = today;
   if ($("#vid-date")) $("#vid-date").value = today;
 
   try {
@@ -81,7 +82,7 @@ async function loadDashboard() {
     const resetBtn = $("#dashboard-reset-btn");
     if (records.length === 0) {
       if (resetBtn) resetBtn.style.display = "none";
-      $("#dashboard-table-wrap").innerHTML = `<p class="muted">No attendance recorded today yet. <a href="#" onclick="switchTab('attendance')">Take attendance →</a></p>`;
+      $("#dashboard-table-wrap").innerHTML = `<p class="muted">No attendance recorded today yet. <a href="#" onclick="switchTab('video')">Take attendance →</a></p>`;
     } else {
       if (resetBtn) resetBtn.style.display = "inline-flex";
       $("#dashboard-table-wrap").innerHTML = buildAttTable(records);
@@ -262,75 +263,39 @@ function confirmRemove(roll, name) {
 async function viewStudentAttendance(roll) {
   try {
     const data = await api(`/attendance/student/${roll}`);
-    switchTab("records");
-    const wrap = $("#records-wrap");
-    wrap.innerHTML = `
-      <div style="margin-bottom:16px">
-        <strong>${data.name}</strong> (${data.roll_no}) —
-        Present: <span style="color:var(--green)">${data.present}</span> / ${data.total_days} days
-        <span class="pill ${data.percentage >= 75 ? "pill-p" : "pill-a"}" style="margin-left:8px">${data.percentage}%</span>
-      </div>${buildAttTable(data.records)}`;
+    
+    const existing = $(".modal-backdrop"); if (existing) existing.remove();
+    const modal = document.createElement("div");
+    modal.className = "modal-backdrop";
+    modal.innerHTML = `<div class="modal" style="max-width:600px; max-height: 80vh; display: flex; flex-direction: column;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h2><i class="fa-solid fa-user-graduate" style="color:var(--primary);margin-right:8px"></i>Student Attendance History</h2>
+        <button class="action-btn" id="modal-close" style="font-size: 20px;"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      
+      <div style="margin-bottom:20px; padding: 12px; background: var(--bg); border-radius: 8px; border: 1px solid var(--border);">
+        <div style="font-size: 18px; margin-bottom: 8px;"><strong>${data.name}</strong> <span class="muted">(${data.roll_no})</span></div>
+        <div style="display: flex; gap: 12px; align-items: center;">
+          <span class="pill pill-p">Present: ${data.present}</span>
+          <span class="pill pill-a">Total Days: ${data.total_days}</span>
+          <span class="pill ${data.percentage >= 75 ? "pill-p" : "pill-a"}" style="margin-left:auto; font-size: 14px;">Overall: ${data.percentage}%</span>
+        </div>
+      </div>
+      
+      <div style="overflow-y: auto; border: 1px solid var(--border); border-radius: 8px;">
+        ${buildAttTable(data.records, false, true)}
+      </div>
+    </div>`;
+    
+    document.body.appendChild(modal);
+    
+    modal.querySelector("#modal-close").onclick = () => modal.remove();
+    // Close when clicking outside the modal
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) modal.remove();
+    });
+
   } catch (e) { toast("Could not load: " + e.message, "error"); }
-}
-
-// ── Photo Attendance ───────────────────────────────────────────────
-function initAttendance() {
-  const zone  = $("#att-upload-zone"), input = $("#att-photo");
-  zone.addEventListener("click", () => input.click());
-  zone.addEventListener("dragover", e => { e.preventDefault(); zone.classList.add("drag-over"); });
-  zone.addEventListener("dragleave", () => zone.classList.remove("drag-over"));
-  zone.addEventListener("drop", e => {
-    e.preventDefault(); zone.classList.remove("drag-over");
-    const f = e.dataTransfer.files[0];
-    if (f) { previewClassPhoto(f); const dt = new DataTransfer(); dt.items.add(f); input.files = dt.files; }
-  });
-  input.addEventListener("change", () => { if (input.files[0]) previewClassPhoto(input.files[0]); });
-  $("#att-process-btn").addEventListener("click", processAttendance);
-  $("#att-clear-btn").addEventListener("click", clearAttendancePanel);
-}
-
-function previewClassPhoto(file) {
-  const wrap = $("#att-preview-wrap"), img = $("#att-preview-img");
-  img.src = URL.createObjectURL(file);
-  wrap.style.display = "block";
-  $("#att-result").style.display = "none";
-  $("#att-clear-btn").style.display = "none";
-}
-
-function clearAttendancePanel() {
-  $("#att-photo").value = "";
-  const img = $("#att-preview-img");
-  if (img.src) { URL.revokeObjectURL(img.src); img.src = ""; }
-  $("#att-preview-wrap").style.display = "none";
-  $("#att-result").style.display = "none";
-  $("#att-clear-btn").style.display = "none";
-  toast("Cleared.", "");
-}
-
-async function processAttendance() {
-  const input = $("#att-photo"), date = $("#att-date").value;
-  const btn = $("#att-process-btn"), spinner = $("#att-spinner"), result = $("#att-result");
-  if (!input.files[0]) { toast("Please upload a class photo first.", "error"); return; }
-
-  const fd = new FormData();
-  fd.append("photo", input.files[0]); if (date) fd.append("date", date);
-
-  btn.disabled = true; spinner.style.display = "block"; result.style.display = "none";
-  try {
-    const data = await api("/attendance/process", { method: "POST", body: fd });
-    $("#r-present").textContent  = data.present;
-    $("#r-absent").textContent   = data.absent;
-    $("#r-detected").textContent = data.faces_detected;
-    $("#r-spoofs").textContent   = data.spoofs_rejected;
-    $("#att-details-wrap").innerHTML = buildAttTable(data.details);
-    result.style.display = "block";
-    $("#att-clear-btn").style.display = "inline-flex";
-    toast(`Attendance recorded: ${data.present} present, ${data.absent} absent.`, "success");
-    loadDashboard();
-  } catch (e) {
-    toast("Processing failed: " + e.message, "error");
-    $("#att-clear-btn").style.display = "inline-flex";
-  } finally { btn.disabled = false; spinner.style.display = "none"; }
 }
 
 // ── Video Attendance (NEW) ─────────────────────────────────────────
@@ -350,6 +315,8 @@ function initVideo() {
   $("#vid-clear-btn").addEventListener("click", () => {
     input.value = ""; $("#vid-filename").style.display = "none";
     $("#vid-result").style.display = "none"; $("#vid-clear-btn").style.display = "none";
+    const preview = $("#vid-preview-img");
+    if (preview) { preview.style.display = "none"; preview.src = ""; }
   });
 }
 
@@ -363,28 +330,69 @@ function showVideoFilename(file) {
 async function processVideo() {
   const input = $("#vid-file"), date = $("#vid-date").value;
   const btn = $("#vid-process-btn"), spinner = $("#vid-spinner"), result = $("#vid-result");
+  const previewImg = $("#vid-preview-img");
   if (!input.files[0]) { toast("Please upload a video first.", "error"); return; }
 
   const fd = new FormData();
   fd.append("video", input.files[0]); if (date) fd.append("date", date);
 
   btn.disabled = true; spinner.style.display = "block"; result.style.display = "none";
+  if (previewImg) { previewImg.style.display = "none"; previewImg.src = ""; }
   toast("Processing video… this may take a minute.", "");
 
   try {
-    const data = await api("/attendance/process-video", { method: "POST", body: fd });
-    $("#vr-present").textContent = data.present;
-    $("#vr-absent").textContent  = data.absent;
-    $("#vr-frames").textContent  = data.frames_processed || "—";
-    $("#vr-faces").textContent   = data.faces_detected;
-    $("#vid-details-wrap").innerHTML = buildAttTable(data.details);
-    result.style.display = "block";
-    $("#vid-clear-btn").style.display = "inline-flex";
-    toast(`Video processed: ${data.present} present, ${data.absent} absent.`, "success");
-    loadDashboard();
+    const res = await fetch(API + "/attendance/process-video", { method: "POST", body: fd });
+    if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${res.status}`);
+    }
+    
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        
+        const lines = buffer.split("\n");
+        buffer = lines.pop(); // keep incomplete line
+        
+        for (const line of lines) {
+            if (!line.trim()) continue;
+            let msg;
+            try { msg = JSON.parse(line); } catch (e) { continue; }
+            
+            if (msg.type === "frame") {
+                if (previewImg) {
+                    previewImg.src = "data:image/jpeg;base64," + msg.image;
+                    previewImg.style.display = "block";
+                }
+            } else if (msg.type === "error") {
+                throw new Error(msg.message);
+            } else if (msg.type === "result") {
+                const data = msg.data;
+                $("#vr-present").textContent = data.present;
+                $("#vr-absent").textContent  = data.absent;
+                $("#vr-frames").textContent  = data.frames_processed || "—";
+                $("#vr-faces").textContent   = data.faces_detected;
+                $("#vr-spoofs").textContent  = data.spoofs_rejected || 0;
+                $("#vid-details-wrap").innerHTML = buildAttTable(data.details);
+                result.style.display = "block";
+                $("#vid-clear-btn").style.display = "inline-flex";
+                toast(`Video processed: ${data.present} present, ${data.absent} absent.`, "success");
+                loadDashboard();
+            }
+        }
+    }
   } catch (e) {
     toast("Video processing failed: " + e.message, "error");
-  } finally { btn.disabled = false; spinner.style.display = "none"; }
+  } finally { 
+      btn.disabled = false; 
+      spinner.style.display = "none"; 
+      if (previewImg && result.style.display === "block") previewImg.style.display = "none"; 
+  }
 }
 
 // ── Records ────────────────────────────────────────────────────────
@@ -418,13 +426,14 @@ function attachOverrideEvents(date) {
   });
 }
 
-function buildAttTable(records, withOverride = false) {
+function buildAttTable(records, withOverride = false, showDate = false) {
   if (!records.length) return '<p class="muted">No records.</p>';
   return `<div class="table-wrap"><table>
-    <thead><tr><th>Roll No</th><th>Name</th><th>Status</th><th>Confidence</th>${withOverride ? "<th>Override</th>" : ""}</tr></thead>
+    <thead><tr>${showDate ? "<th>Date</th>" : ""}<th>Roll No</th><th>Name</th><th>Status</th><th>Confidence</th>${withOverride ? "<th>Override</th>" : ""}</tr></thead>
     <tbody>${records.map(r => {
       const confPct = r.confidence ? Math.round(r.confidence * 100) : 0;
       return `<tr>
+        ${showDate ? `<td>${fmtDate(r.date)}</td>` : ""}
         <td><strong>${r.roll_no}</strong></td>
         <td>${r.name || "—"}</td>
         <td><span class="pill ${r.status === "P" ? "pill-p" : "pill-a"}">${r.status === "P" ? "Present" : "Absent"}</span></td>
@@ -500,27 +509,31 @@ async function rejectCandidate(id) {
 
 // ── Metrics (NEW) ─────────────────────────────────────────────────
 function initMetrics() {
-  const zone = $("#eval-upload-zone"), input = $("#eval-photo");
+  const zone = $("#eval-upload-zone"), input = $("#eval-video");
   if (!zone || !input) return;
   zone.addEventListener("click", () => input.click());
   input.addEventListener("change", () => {
-    if (input.files[0]) zone.innerHTML = `<i class="fa-solid fa-circle-check" style="color:var(--green);font-size:24px"></i><p style="color:var(--green)">Photo selected: ${input.files[0].name}</p>`;
+    if (input.files[0]) {
+      const el = $("#eval-filename");
+      el.textContent = `Video selected: ${input.files[0].name}`;
+      el.style.display = "block";
+    }
   });
   $("#eval-btn").addEventListener("click", runEvaluation);
   if ($("#eval-date")) $("#eval-date").value = todayStr();
 }
 
 async function runEvaluation() {
-  const input = $("#eval-photo"), gt = $("#eval-ground-truth").value.trim();
+  const input = $("#eval-video"), gt = $("#eval-ground-truth").value.trim();
   const date  = $("#eval-date").value;
-  if (!input.files[0]) { toast("Upload a class photo first.", "error"); return; }
+  if (!input.files[0]) { toast("Upload a class video first.", "error"); return; }
   if (!gt) { toast("Enter the ground truth roll numbers.", "error"); return; }
 
   const btn = $("#eval-btn"), spinner = $("#eval-spinner"), result = $("#eval-result");
   btn.disabled = true; spinner.style.display = "block"; result.style.display = "none";
 
   const fd = new FormData();
-  fd.append("photo", input.files[0]);
+  fd.append("video", input.files[0]);
   fd.append("ground_truth_rolls", gt);
   if (date) fd.append("date", date);
 
@@ -616,9 +629,8 @@ function initDashboard() {
 
 // ── Init ───────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
-  startClock(); initNav(); initEnroll(); initAttendance(); initVideo(); initMetrics(); initDashboard(); initExport();
+  startClock(); initNav(); initEnroll(); initVideo(); initMetrics(); initDashboard(); initExport();
   const today = todayStr();
-  if ($("#att-date")) $("#att-date").value = today;
   if ($("#vid-date")) $("#vid-date").value = today;
   if ($("#eval-date")) $("#eval-date").value = today;
   if ($("#records-date")) $("#records-date").value = today;

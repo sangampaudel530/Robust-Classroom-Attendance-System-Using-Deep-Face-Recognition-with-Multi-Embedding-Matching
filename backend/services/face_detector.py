@@ -83,7 +83,9 @@ class FaceDetector:
 
     def _detect_single_pass(self, image: np.ndarray, det_size: tuple) -> list:
         """Run InsightFace detection at a given det_size. Returns list of face objects."""
-        self.app.prepare(ctx_id=-1, det_size=det_size)
+        import onnxruntime as ort
+        ctx_id = 0 if "CUDAExecutionProvider" in ort.get_available_providers() else -1
+        self.app.prepare(ctx_id=ctx_id, det_size=det_size)
         return self.app.get(image)
 
     def _detect_tiled(self, image: np.ndarray, tile_overlap: float = 0.25) -> list:
@@ -158,6 +160,7 @@ class FaceDetector:
                         "bbox": bbox,
                         "embedding": emb,
                         "landmarks": getattr(face, "landmark", None),
+                        "pose": getattr(face, "pose", None),
                     })
 
         if not all_boxes:
@@ -193,6 +196,7 @@ class FaceDetector:
         image: np.ndarray,
         is_group: bool = False,
         use_clahe_fallback: bool = True,
+        video_mode: bool = False,
     ) -> List[Dict[str, Any]]:
         """Detect all faces in an image.
 
@@ -200,6 +204,8 @@ class FaceDetector:
           1. Full-image detection at high det_size
           2. Tiled detection at higher per-tile resolution (catches small faces)
           3. NMS to merge both sets of detections
+          
+        If video_mode=True, tiled detection is skipped to significantly improve processing speed.
 
         Returns list of dicts with 'bbox', 'face_crop', 'embedding'.
         """
@@ -217,16 +223,19 @@ class FaceDetector:
                     "bbox": face.bbox.astype(float),
                     "embedding": emb,
                     "score": float(getattr(face, "det_score", 0.5)),
+                    "pose": getattr(face, "pose", None),
                 })
 
             # Strategy 2: Tiled detection (catches missed small faces)
-            tiled_faces = self._detect_tiled(image, tile_overlap=0.25)
-            for face_data in tiled_faces:
-                raw_detections.append({
-                    "bbox": face_data["bbox"].astype(float) if isinstance(face_data["bbox"], np.ndarray) else np.array(face_data["bbox"], dtype=float),
-                    "embedding": face_data["embedding"],
-                    "score": 0.5,
-                })
+            if not video_mode:
+                tiled_faces = self._detect_tiled(image, tile_overlap=0.25)
+                for face_data in tiled_faces:
+                    raw_detections.append({
+                        "bbox": face_data["bbox"].astype(float) if isinstance(face_data["bbox"], np.ndarray) else np.array(face_data["bbox"], dtype=float),
+                        "embedding": face_data["embedding"],
+                        "score": 0.5,
+                        "pose": face_data.get("pose", None),
+                    })
 
             # Merge with NMS
             if raw_detections:
@@ -247,6 +256,7 @@ class FaceDetector:
                     "bbox": face.bbox.astype(float),
                     "embedding": emb,
                     "score": float(getattr(face, "det_score", 0.5)),
+                    "pose": getattr(face, "pose", None),
                 })
 
         is_clahe_used = False
