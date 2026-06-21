@@ -336,9 +336,43 @@ async function processVideo() {
   const fd = new FormData();
   fd.append("video", input.files[0]); if (date) fd.append("date", date);
 
-  btn.disabled = true; spinner.style.display = "block"; result.style.display = "none";
-  if (previewImg) { previewImg.style.display = "none"; previewImg.src = ""; }
-  toast("Processing video… this may take a minute.", "");
+  btn.disabled = true;
+  result.style.display = "none";
+
+  // Show preview area immediately so frames appear as they arrive
+  if (previewImg) {
+    previewImg.style.display = "block";
+    previewImg.src = "";
+    previewImg.style.opacity = "0.5";
+  }
+
+  // Show a minimal processing status (not a blocking spinner)
+  spinner.style.display = "block";
+  spinner.querySelector("p").textContent = "Starting GPU processing…";
+
+  toast("Processing video on GPU…", "");
+
+  // Pending frame queue for smooth rendering via requestAnimationFrame
+  let pendingFrame = null;
+  let rafScheduled = false;
+  let frameCount = 0;
+
+  function renderFrame() {
+    if (pendingFrame) {
+      previewImg.src = "data:image/jpeg;base64," + pendingFrame;
+      previewImg.style.opacity = "1";
+      pendingFrame = null;
+    }
+    rafScheduled = false;
+  }
+
+  function scheduleFrame(b64) {
+    pendingFrame = b64;  // always keep only the latest frame
+    if (!rafScheduled) {
+      rafScheduled = true;
+      requestAnimationFrame(renderFrame);
+    }
+  }
 
   try {
     const res = await fetch(API + "/attendance/process-video", { method: "POST", body: fd });
@@ -365,10 +399,13 @@ async function processVideo() {
             try { msg = JSON.parse(line); } catch (e) { continue; }
             
             if (msg.type === "frame") {
-                if (previewImg) {
-                    previewImg.src = "data:image/jpeg;base64," + msg.image;
-                    previewImg.style.display = "block";
-                }
+                frameCount++;
+                // Queue the latest frame — requestAnimationFrame will render it
+                scheduleFrame(msg.image);
+                // Update progress text
+                const pct = msg.progress ?? 0;
+                spinner.querySelector("p").textContent = `GPU processing… ${pct}% (frame ${frameCount})`;
+
             } else if (msg.type === "error") {
                 throw new Error(msg.message);
             } else if (msg.type === "result") {
@@ -377,21 +414,25 @@ async function processVideo() {
                 $("#vr-absent").textContent  = data.absent;
                 $("#vr-frames").textContent  = data.frames_processed || "—";
                 $("#vr-faces").textContent   = data.faces_detected;
-                $("#vr-spoofs").textContent  = data.spoofs_rejected || 0;
+                $("#vr-spoofs").textContent  = data.spoof_faces_detected ?? data.spoofs_rejected ?? 0;
                 $("#vid-details-wrap").innerHTML = buildAttTable(data.details);
                 result.style.display = "block";
                 $("#vid-clear-btn").style.display = "inline-flex";
-                toast(`Video processed: ${data.present} present, ${data.absent} absent.`, "success");
+                toast(`Done: ${data.present} present, ${data.absent} absent.`, "success");
                 loadDashboard();
             }
         }
     }
   } catch (e) {
     toast("Video processing failed: " + e.message, "error");
+    if (previewImg) { previewImg.style.display = "none"; previewImg.src = ""; }
   } finally { 
       btn.disabled = false; 
-      spinner.style.display = "none"; 
-      if (previewImg && result.style.display === "block") previewImg.style.display = "none"; 
+      spinner.style.display = "none";
+      // Keep preview visible so teacher can see the last annotated frame
+      if (previewImg && previewImg.src && result.style.display === "block") {
+        previewImg.style.opacity = "1";
+      }
   }
 }
 
@@ -521,6 +562,26 @@ function initMetrics() {
   });
   $("#eval-btn").addEventListener("click", runEvaluation);
   if ($("#eval-date")) $("#eval-date").value = todayStr();
+
+  // Clear Evaluation History button
+  const clearBtn = $("#clear-metrics-btn");
+  if (clearBtn) {
+    clearBtn.addEventListener("click", async () => {
+      if (!confirm("Delete all evaluation history? This cannot be undone.")) return;
+      clearBtn.disabled = true;
+      clearBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+      try {
+        const data = await api("/attendance/metrics/history", { method: "DELETE" });
+        toast(`Cleared ${data.deleted} evaluation session(s).`, "success");
+        loadMetrics();
+      } catch (e) {
+        toast("Failed to clear history: " + e.message, "error");
+      } finally {
+        clearBtn.disabled = false;
+        clearBtn.innerHTML = '<i class="fa-solid fa-trash"></i> Clear History';
+      }
+    });
+  }
 }
 
 async function runEvaluation() {

@@ -345,6 +345,19 @@ async def get_metrics_history(db: AsyncSession = Depends(get_db)):
     return {"sessions": [r.to_dict() for r in records]}
 
 
+@router.delete("/metrics/history")
+async def clear_metrics_history(db: AsyncSession = Depends(get_db)):
+    """Delete all evaluation history records."""
+    result = await db.execute(select(EvaluationRecord))
+    records = result.scalars().all()
+    count = len(records)
+    for rec in records:
+        await db.delete(rec)
+    await db.commit()
+    logger.info("Cleared %d evaluation history records.", count)
+    return {"deleted": count, "message": f"Cleared {count} evaluation session(s)."}
+
+
 @router.get("/{class_date}")
 async def attendance_by_date(class_date: str, db: AsyncSession = Depends(get_db)):
     parsed_date = _parse_date(class_date)
