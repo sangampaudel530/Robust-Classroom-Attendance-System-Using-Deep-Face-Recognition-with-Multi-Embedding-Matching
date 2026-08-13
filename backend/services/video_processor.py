@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.models.active_learning import ActiveLearningCandidate
 from backend.models.attendance import AttendanceRecord
 from backend.models.student import Student
-from backend.services.anti_spoof import AntiSpoofing
 from backend.services.face_detector import FaceDetector
 from backend.services.recognizer import FaceRecognizer, get_shared_app
 
@@ -50,7 +49,9 @@ class VideoProcessor:
         shared = get_shared_app()
         self.detector = FaceDetector(app=shared)
         self.recognizer = FaceRecognizer()
-        self.anti_spoof = AntiSpoofing()
+        import onnxruntime as ort
+        self._use_gpu = "CUDAExecutionProvider" in ort.get_available_providers()
+        logger.info("VideoProcessor GPU=%s", self._use_gpu)
 
     def extract_frames(self, video_path: str) -> List[np.ndarray]:
         """Extract frames at a rate of TARGET_FPS."""
@@ -131,8 +132,6 @@ class VideoProcessor:
         student_data: Dict[str, List[Dict]] = {roll: [] for roll in enrolled_rolls}
         
         total_faces_detected = 0
-        spoof_faces_detected = 0  # per-frame spoof face count (regardless of attendance outcome)
-        students_rejected_by_spoof = 0  # students marked absent due to spoofing
         
         al_saved_rolls = set()  # prevent spamming active learning candidates for the same student
 
@@ -143,8 +142,8 @@ class VideoProcessor:
             # Visual display frame
             display_frame = frame.copy()
             
-            # video_mode=False: enable tiled detection since GPU makes it fast enough
-            detected_faces = self.detector.detect(frame, is_group=True, video_mode=False)
+            # Use tiled detection only when GPU is available; skip on CPU for speed
+            detected_faces = self.detector.detect(frame, is_group=True, video_mode=not self._use_gpu)
             total_faces_detected += len(detected_faces)
 
             for face_data in detected_faces:
@@ -166,53 +165,36 @@ class VideoProcessor:
                 label = "Unknown"
 
                 if best_roll:
-                    # Only run the expensive anti-spoof neural network on detected faces
-                    is_real, spoof_score = self.anti_spoof.is_real(frame, bbox)
-                    
                     if match_score >= MATCH_THRESHOLD:
                         student_data[best_roll].append({
                             "match_score": match_score,
-                            "spoof_score": spoof_score,
-                            "is_real": is_real,   # store per-detection liveness
                             "pose": pose
                         })
                         
-                        if is_real:
-                            box_color = (0, 255, 0) # Green for Real
-                            label = f"{student_map[best_roll]} ({match_score:.2f}) [REAL]"
-                        else:
-                            spoof_faces_detected += 1  # count every spoof face detection
-                            box_color = (0, 0, 255) # Red for Spoof
-                            label = f"{student_map[best_roll]} ({match_score:.2f}) [SPOOF]"
+                        box_color = (0, 255, 0) # Green for Real
+                        label = f"{student_map[best_roll]} ({match_score:.2f})"
                             
-                    else:
-                        # Match score is below threshold
-                        if not is_real:
-                            spoof_faces_detected += 1  # below-threshold spoof still counts
-                            box_color = (0, 0, 255) # Red
-                            label = f"{student_map[best_roll]} ({match_score:.2f}) [SPOOF]"
-                        elif match_score >= 0.35:
-                            # It passed the liveness check, but match score is low. Treat as Active Learning.
-                            box_color = (0, 255, 255) # Yellow for Active Learning Candidate
-                            label = f"? {student_map[best_roll]} ({match_score:.2f})"
+                    elif match_score >= 0.35:
+                        # Match score is low but above noise floor. Treat as Active Learning.
+                        box_color = (0, 255, 255) # Yellow for Active Learning Candidate
+                        label = f"? {student_map[best_roll]} ({match_score:.2f})"
+                        
+                        # Only save one AL candidate per student per video to avoid spam
+                        if best_roll not in al_saved_rolls and "face_crop" in face_data and face_data["face_crop"] is not None:
+                            crop_id = uuid.uuid4().hex
+                            crop_filename = f"{crop_id}.jpg"
+                            crop_path = AL_DIR / crop_filename
+                            cv2.imwrite(str(crop_path), face_data["face_crop"])
                             
-                            # ACTIVE LEARNING: High enough to be a face, low enough to fail threshold, but passed anti-spoof
-                            # Only save one AL candidate per student per video to avoid spam
-                            if best_roll not in al_saved_rolls and "face_crop" in face_data and face_data["face_crop"] is not None:
-                                crop_id = uuid.uuid4().hex
-                                crop_filename = f"{crop_id}.jpg"
-                                crop_path = AL_DIR / crop_filename
-                                cv2.imwrite(str(crop_path), face_data["face_crop"])
-                                
-                                db.add(ActiveLearningCandidate(
-                                    id=crop_id,
-                                    class_date=class_date,
-                                    face_crop_path=f"data/active_learning/{crop_filename}",
-                                    suggested_roll_no=best_roll,
-                                    suggested_name=student_map[best_roll],
-                                    suggested_confidence=match_score
-                                ))
-                                al_saved_rolls.add(best_roll)
+                            db.add(ActiveLearningCandidate(
+                                id=crop_id,
+                                class_date=class_date,
+                                face_crop_path=f"data/active_learning/{crop_filename}",
+                                suggested_roll_no=best_roll,
+                                suggested_name=student_map[best_roll],
+                                suggested_confidence=match_score
+                            ))
+                            al_saved_rolls.add(best_roll)
 
                 if bbox is not None:
                     x1, y1, x2, y2 = map(int, bbox[:4])
@@ -235,51 +217,13 @@ class VideoProcessor:
         for roll_no in enrolled_rolls:
             data = student_data[roll_no]
             if len(data) >= MIN_FRAMES_FOR_PRESENT:
-                # Split detections into real vs spoof
-                real_detections  = [d for d in data if d["is_real"]]
-                spoof_detections = [d for d in data if not d["is_real"]]
-
-                # has_real: require at least 2 real detections across frames
-                # (prevents a single accidental match from marking someone Present)
-                has_real = len(real_detections) >= 2
-
-                # Static-spoof check: only on real detections (a still photo held by someone
-                # else won't have pose variance, but the real person's pose will)
-                is_static_spoof = False
-                if has_real and len(real_detections) >= 2 and self.anti_spoof.mode == "enforce":
-                    poses = [d["pose"] for d in real_detections if d["pose"] is not None]
-                    if len(poses) >= 2:
-                        pose_arr = np.array(poses)  # shape (N, 3)
-                        total_variance = float(np.sum(np.var(pose_arr, axis=0)))
-                        logger.debug("%s real-detection pose variance: %.4f", roll_no, total_variance)
-                        # 0.1 threshold: only reject if variance is near-zero (literally static).
-                        # 0.5 was too strict — students sitting still also have low variance.
-                        if total_variance < 0.1:
-                            is_static_spoof = True
-                            logger.warning("%s rejected: real detections have suspiciously low pose variance.", roll_no)
-
-                if has_real and not is_static_spoof:
-                    # Present: at least one genuinely live face seen
-                    max_conf = max(d["match_score"] for d in real_detections)
-                    attendance[roll_no] = {
-                        "status": "P",
-                        "confidence": round(max_conf, 4),
-                        "name": student_map[roll_no],
-                        "frames_seen": len(data),
-                        "real_frames": len(real_detections),
-                    }
-                else:
-                    # Only spoof detections seen (e.g. someone held up a photo)
-                    students_rejected_by_spoof += 1
-                    reason = "static spoof" if is_static_spoof else "no real face detected"
-                    logger.warning("%s marked absent — %s.", roll_no, reason)
-                    attendance[roll_no] = {
-                        "status": "A",
-                        "confidence": 0.0,
-                        "name": student_map[roll_no],
-                        "frames_seen": len(data),
-                        "real_frames": 0,
-                    }
+                max_conf = max(d["match_score"] for d in data)
+                attendance[roll_no] = {
+                    "status": "P",
+                    "confidence": round(max_conf, 4),
+                    "name": student_map[roll_no],
+                    "frames_seen": len(data),
+                }
             else:
                 attendance[roll_no] = {
                     "status": "A",
@@ -323,8 +267,6 @@ class VideoProcessor:
             "absent": len(students) - present_count,
             "frames_processed": len(frames),
             "faces_detected": total_faces_detected,
-            "spoof_faces_detected": spoof_faces_detected,          # per-frame spoof detections
-            "spoofs_rejected": students_rejected_by_spoof,          # students rejected for spoofing
             "details": [
                 {"roll_no": roll, "name": info["name"],
                  "status": info["status"], "confidence": info["confidence"],

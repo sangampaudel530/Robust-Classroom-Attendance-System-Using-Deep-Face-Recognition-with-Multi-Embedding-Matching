@@ -19,3 +19,12 @@ __pycache__/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Database
+face_attendance.db
+
+# Uploaded classroom videos & generated class photos (keep upload dir empty in git)
+data/uploads/
+
+# Active learning face crops (runtime-generated)
+data/active_learning/

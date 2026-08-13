@@ -414,7 +414,7 @@ async function processVideo() {
                 $("#vr-absent").textContent  = data.absent;
                 $("#vr-frames").textContent  = data.frames_processed || "—";
                 $("#vr-faces").textContent   = data.faces_detected;
-                $("#vr-spoofs").textContent  = data.spoof_faces_detected ?? data.spoofs_rejected ?? 0;
+                
                 $("#vid-details-wrap").innerHTML = buildAttTable(data.details);
                 result.style.display = "block";
                 $("#vid-clear-btn").style.display = "inline-flex";

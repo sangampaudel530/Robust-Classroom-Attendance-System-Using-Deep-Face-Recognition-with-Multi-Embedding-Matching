@@ -18,5 +18,5 @@ openpyxl
 
 # Face Recognition & AI Models
 insightface
-onnxruntime
+onnxruntime  # CPU runtime, works everywhere. For GPU: pip install onnxruntime-gpu
 faiss-cpu

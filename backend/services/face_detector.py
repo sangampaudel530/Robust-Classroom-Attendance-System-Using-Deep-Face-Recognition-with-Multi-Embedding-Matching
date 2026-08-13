@@ -30,6 +30,10 @@ class FaceDetector:
             from backend.services.recognizer import get_shared_app
             app = get_shared_app()
         self.app = app
+        import onnxruntime as ort
+        self._ctx_id = 0 if "CUDAExecutionProvider" in ort.get_available_providers() else -1
+        self._last_det_size = None
+        logger.info("FaceDetector ctx_id=%d (%s)", self._ctx_id, "GPU" if self._ctx_id == 0 else "CPU")
 
     # -- Preprocessing -------------------------------------------------------
 
@@ -83,9 +87,9 @@ class FaceDetector:
 
     def _detect_single_pass(self, image: np.ndarray, det_size: tuple) -> list:
         """Run InsightFace detection at a given det_size. Returns list of face objects."""
-        import onnxruntime as ort
-        ctx_id = 0 if "CUDAExecutionProvider" in ort.get_available_providers() else -1
-        self.app.prepare(ctx_id=ctx_id, det_size=det_size)
+        if self._last_det_size != det_size:
+            self.app.prepare(ctx_id=self._ctx_id, det_size=det_size)
+            self._last_det_size = det_size
         return self.app.get(image)
 
     def _detect_tiled(self, image: np.ndarray, tile_overlap: float = 0.25) -> list:
