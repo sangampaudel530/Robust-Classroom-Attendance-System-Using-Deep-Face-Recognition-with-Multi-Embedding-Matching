@@ -18,9 +18,13 @@ from dotenv import load_dotenv
 from backend.database import init_db
 from backend.routers.attendance import router as attendance_router
 from backend.routers.students import router as students_router
+from backend.routers.student_updates import router as student_updates_router
+from backend.services.recognizer import EMBED_DIR, PHOTO_DIR
+from backend.services.video_processor import AL_DIR, UPLOAD_DIR
 import backend.models.attendance  # noqa: F401
 import backend.models.student  # noqa: F401
 import backend.models.active_learning  # noqa: F401
+import backend.models.evaluation  # noqa: F401
 
 
 load_dotenv()
@@ -35,7 +39,7 @@ VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".wmv", ".flv", ".m
 
 def _cleanup_orphaned_videos():
     """Delete any leftover video files from data/uploads/ (from previous crashes)."""
-    upload_dir = Path("data/uploads")
+    upload_dir = UPLOAD_DIR
     if not upload_dir.exists():
         return
     deleted = 0
@@ -57,8 +61,8 @@ async def lifespan(app: FastAPI):
     await init_db()
 
     # Ensure required data directories exist
-    for d in ["data/student_photos", "data/embeddings", "data/uploads", "data/active_learning"]:
-        Path(d).mkdir(parents=True, exist_ok=True)
+    for directory in [PHOTO_DIR, EMBED_DIR, UPLOAD_DIR, AL_DIR]:
+        directory.mkdir(parents=True, exist_ok=True)
 
     # Clean up orphaned video files left from previous runs (crashes, etc.)
     _cleanup_orphaned_videos()
@@ -87,13 +91,14 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],   # Restrict to your domain in production
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # API routers
 app.include_router(students_router,   prefix="/api")
+app.include_router(student_updates_router, prefix="/api")
 app.include_router(attendance_router, prefix="/api")
 
 
@@ -104,8 +109,13 @@ STATIC_DIR   = FRONTEND_DIR / "static"
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# Mount data directory to serve face crops for active learning
-app.mount("/data", StaticFiles(directory="data"), name="data")
+# Expose only active-learning crops. Embeddings and class uploads must never be
+# publicly downloadable through the static-file server.
+app.mount(
+    "/data/active_learning",
+    StaticFiles(directory=str(AL_DIR)),
+    name="active-learning-data",
+)
 
 
 @app.get("/", include_in_schema=False)

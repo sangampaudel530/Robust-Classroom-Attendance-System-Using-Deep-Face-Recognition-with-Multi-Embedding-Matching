@@ -9,12 +9,13 @@ Key benefits of Video vs Photo:
   - Mitigates occlusions (people moving their heads, walking in front).
 """
 
+import base64
 import logging
 import os
 import uuid
 from datetime import date as date_type
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List
 
 import cv2
 import numpy as np
@@ -32,17 +33,19 @@ logger = logging.getLogger(__name__)
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "data/uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-AL_DIR = Path("data/active_learning")
+AL_DIR = Path(os.getenv("ACTIVE_LEARNING_DIR", "data/active_learning"))
 AL_DIR.mkdir(parents=True, exist_ok=True)
 
 MATCH_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", "0.50"))
 
 # Target FPS for extraction — GPU allows higher sampling for better accuracy
 # 3 fps on a 10s video = ~30 frames, capturing students from many angles
-TARGET_FPS = int(os.getenv("VIDEO_TARGET_FPS", "3"))
+TARGET_FPS = max(1, int(os.getenv("VIDEO_TARGET_FPS", "3")))
 # Minimum frames a student must appear in to be marked present.
 # With 3 fps sampling, a student visible for just 1 second hits this threshold.
-MIN_FRAMES_FOR_PRESENT = int(os.getenv("VIDEO_MIN_FRAMES", "2"))
+MIN_FRAMES_FOR_PRESENT = max(1, int(os.getenv("VIDEO_MIN_FRAMES", "2")))
+MAX_VIDEO_FRAMES = max(1, int(os.getenv("VIDEO_MAX_FRAMES", "60")))
+MAX_FRAME_DIMENSION = max(640, int(os.getenv("VIDEO_MAX_FRAME_DIMENSION", "1920")))
 
 class VideoProcessor:
     def __init__(self):
@@ -66,6 +69,7 @@ class VideoProcessor:
             
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames <= 0:
+            cap.release()
             return []
 
         # Calculate stride to extract exactly TARGET_FPS frames per second
@@ -74,16 +78,23 @@ class VideoProcessor:
         frames = []
         frame_idx = 0
         while cap.isOpened():
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             if not ret:
                 break
-            frames.append(frame)
-            frame_idx += stride
-            
-            # Cap at some reasonable maximum to prevent memory exhaustion (e.g. 60 seconds = 120 frames)
-            if len(frames) > 120:
-                break
+            if frame_idx % stride == 0:
+                height, width = frame.shape[:2]
+                max_dimension = max(height, width)
+                if max_dimension > MAX_FRAME_DIMENSION:
+                    scale = MAX_FRAME_DIMENSION / max_dimension
+                    frame = cv2.resize(
+                        frame,
+                        (int(width * scale), int(height * scale)),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                frames.append(frame)
+                if len(frames) >= MAX_VIDEO_FRAMES:
+                    break
+            frame_idx += 1
 
         cap.release()
         logger.info("Extracted %d frames from video (total_frames=%d, fps=%.1f).", len(frames), total_frames, fps)
@@ -94,7 +105,9 @@ class VideoProcessor:
         video_bytes: bytes,
         class_date: date_type,
         db: AsyncSession,
-        filename_ext: str = ".mp4"
+        filename_ext: str = ".mp4",
+        persist_records: bool = True,
+        create_active_learning: bool = True,
     ):
         """Process a video file for attendance using multi-frame voting."""
         
@@ -111,19 +124,24 @@ class VideoProcessor:
             yield {"type": "error", "message": "Could not extract frames from the video."}
             return
 
-        # Save a representative frame as the "class photo" for records
-        rep_frame = frames[len(frames) // 2]
-        photo_filename = f"class_{class_date}_{uuid.uuid4().hex[:8]}.jpg"
-        photo_path = UPLOAD_DIR / photo_filename
-        cv2.imwrite(str(photo_path), rep_frame)
-
         # Get active students
-        result = await db.execute(select(Student).where(Student.is_active == True))
+        result = await db.execute(select(Student).where(Student.is_active.is_(True)))
         students: List[Student] = result.scalars().all()
         if not students:
             video_path.unlink()
             yield {"type": "error", "message": "No enrolled students found."}
             return
+
+        # Evaluations must not create attendance artifacts.
+        photo_path = None
+        if persist_records:
+            rep_frame = frames[len(frames) // 2]
+            photo_filename = f"class_{class_date}_{uuid.uuid4().hex[:8]}.jpg"
+            photo_path = UPLOAD_DIR / photo_filename
+            if not cv2.imwrite(str(photo_path), rep_frame):
+                video_path.unlink(missing_ok=True)
+                yield {"type": "error", "message": "Could not save the representative class frame."}
+                return
 
         enrolled_rolls = [s.roll_no for s in students]
         student_map = {s.roll_no: s.name for s in students}
@@ -180,21 +198,20 @@ class VideoProcessor:
                         label = f"? {student_map[best_roll]} ({match_score:.2f})"
                         
                         # Only save one AL candidate per student per video to avoid spam
-                        if best_roll not in al_saved_rolls and "face_crop" in face_data and face_data["face_crop"] is not None:
+                        if create_active_learning and best_roll not in al_saved_rolls and "face_crop" in face_data and face_data["face_crop"] is not None:
                             crop_id = uuid.uuid4().hex
                             crop_filename = f"{crop_id}.jpg"
                             crop_path = AL_DIR / crop_filename
-                            cv2.imwrite(str(crop_path), face_data["face_crop"])
-                            
-                            db.add(ActiveLearningCandidate(
-                                id=crop_id,
-                                class_date=class_date,
-                                face_crop_path=f"data/active_learning/{crop_filename}",
-                                suggested_roll_no=best_roll,
-                                suggested_name=student_map[best_roll],
-                                suggested_confidence=match_score
-                            ))
-                            al_saved_rolls.add(best_roll)
+                            if cv2.imwrite(str(crop_path), face_data["face_crop"]):
+                                db.add(ActiveLearningCandidate(
+                                    id=crop_id,
+                                    class_date=class_date,
+                                    face_crop_path=str(crop_path),
+                                    suggested_roll_no=best_roll,
+                                    suggested_name=student_map[best_roll],
+                                    suggested_confidence=match_score,
+                                ))
+                                al_saved_rolls.add(best_roll)
 
                 if bbox is not None:
                     x1, y1, x2, y2 = map(int, bbox[:4])
@@ -203,7 +220,6 @@ class VideoProcessor:
                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
 
             # Yield the frame for live web streaming
-            import base64
             _, buffer = cv2.imencode('.jpg', display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
             b64_img = base64.b64encode(buffer).decode('utf-8')
             yield {
@@ -232,31 +248,43 @@ class VideoProcessor:
                     "frames_seen": len(data)
                 }
 
-        # Persist to DB
-        for roll_no, info in attendance.items():
-            record_id = f"{roll_no}_{class_date}"
-            existing = await db.get(AttendanceRecord, record_id)
-            if existing:
-                existing.status = info["status"]
-                existing.confidence = info["confidence"]
-                existing.class_photo_path = str(photo_path)
-            else:
-                db.add(AttendanceRecord(
-                    id=record_id,
-                    roll_no=roll_no,
-                    date=class_date,
-                    status=info["status"],
-                    confidence=info["confidence"],
-                    class_photo_path=str(photo_path),
-                ))
+        if persist_records:
+            old_photo_paths = set()
+            for roll_no, info in attendance.items():
+                record_id = f"{roll_no}_{class_date}"
+                existing = await db.get(AttendanceRecord, record_id)
+                if existing:
+                    if existing.class_photo_path and existing.class_photo_path != str(photo_path):
+                        old_photo_paths.add(existing.class_photo_path)
+                    existing.status = info["status"]
+                    existing.confidence = info["confidence"]
+                    existing.class_photo_path = str(photo_path)
+                else:
+                    db.add(AttendanceRecord(
+                        id=record_id,
+                        roll_no=roll_no,
+                        date=class_date,
+                        status=info["status"],
+                        confidence=info["confidence"],
+                        class_photo_path=str(photo_path),
+                    ))
 
-        await db.commit()
+            await db.commit()
+
+            # Remove superseded class frames only when no record still uses them.
+            for old_path_value in old_photo_paths:
+                still_used = await db.execute(
+                    select(AttendanceRecord.id)
+                    .where(AttendanceRecord.class_photo_path == old_path_value)
+                    .limit(1)
+                )
+                if still_used.scalar_one_or_none() is None:
+                    old_path = Path(old_path_value)
+                    if old_path.parent.resolve() == UPLOAD_DIR.resolve():
+                        old_path.unlink(missing_ok=True)
         
         # Cleanup video (keep the representative photo)
-        try:
-            video_path.unlink()
-        except OSError:
-            pass
+        video_path.unlink(missing_ok=True)
 
         present_count = sum(1 for v in attendance.values() if v["status"] == "P")
         

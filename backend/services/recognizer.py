@@ -13,6 +13,7 @@ Key improvements over v1:
 
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -71,8 +72,8 @@ def load_gallery() -> Tuple:
     for path in EMBED_DIR.glob("*.npz"):
         roll_no = path.stem
         try:
-            data = np.load(path)
-            embs = data["embeddings"]  # shape (N, 512)
+            with np.load(path) as data:
+                embs = data["embeddings"].copy()  # shape (N, 512)
             for emb in embs:
                 norm = np.linalg.norm(emb)
                 if norm < 1e-6:
@@ -148,8 +149,17 @@ def get_shared_app():
 
 class FaceRecognizer:
     def __init__(self, embeddings_dir: Optional[str] = None):
-        self.app = get_shared_app()
+        # Loading InsightFace takes several seconds and is unnecessary for
+        # read-only operations such as listing enrollment quality. Load it
+        # only when an operation actually needs inference.
+        self._app = None
         self.embeddings_dir = Path(embeddings_dir) if embeddings_dir else EMBED_DIR
+
+    @property
+    def app(self):
+        if self._app is None:
+            self._app = get_shared_app()
+        return self._app
 
     # -- Embedding extraction ------------------------------------------------
 
@@ -213,8 +223,8 @@ class FaceRecognizer:
         num_embeddings = 0
         if npz_path.exists():
             try:
-                data = np.load(npz_path)
-                num_embeddings = len(data["embeddings"])
+                with np.load(npz_path) as data:
+                    num_embeddings = len(data["embeddings"])
             except Exception:
                 pass
 
@@ -239,7 +249,15 @@ class FaceRecognizer:
         if not valid:
             return
         stacked = np.vstack([e.reshape(1, -1) for e in valid]).astype(np.float32)
-        np.savez(self._embed_path_npz(roll_no), embeddings=stacked)
+        self.embeddings_dir.mkdir(parents=True, exist_ok=True)
+        destination = self._embed_path_npz(roll_no)
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("wb") as handle:
+                np.savez(handle, embeddings=stacked)
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
 
         # Remove legacy .npy if exists
         legacy = self._embed_path_npy(roll_no)
@@ -253,7 +271,8 @@ class FaceRecognizer:
         npz_path = self._embed_path_npz(roll_no)
         if npz_path.exists():
             try:
-                return np.load(npz_path)["embeddings"]
+                with np.load(npz_path) as data:
+                    return data["embeddings"].copy()
             except Exception:
                 pass
 
@@ -284,7 +303,7 @@ class FaceRecognizer:
 
     def update_student_embedding(self, roll_no: str) -> None:
         """Re-compute and save embeddings from all photos on disk."""
-        student_dir = Path("data/student_photos") / roll_no
+        student_dir = PHOTO_DIR / roll_no
         if not student_dir.exists():
             self.remove_embedding(roll_no)
             return
@@ -376,8 +395,10 @@ class FaceRecognizer:
             index, labels = load_gallery()
 
             if index is not None and index.ntotal > 0:
-                # Search top-K (capped at total vectors)
-                k = min(index.ntotal, 20)
+                # Search the complete gallery. Filtering only a fixed top-K can
+                # hide active students when inactive students retain many close
+                # embeddings for later re-enrollment.
+                k = index.ntotal
                 distances, indices = index.search(query, k)
 
                 # Find best match per enrolled student

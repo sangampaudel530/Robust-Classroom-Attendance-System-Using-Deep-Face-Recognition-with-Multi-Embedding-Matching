@@ -390,6 +390,10 @@ tr:hover td { background: #FAFBFF; }
   color: var(--text2);
 }
 .action-btn:hover { background: var(--gray-lt); color: var(--text); }
+.action-btn.photos { color: #7C3AED; font-weight: 600; }
+.action-btn.photos:hover { background: #F3E8FF; color: #6D28D9; }
+.action-btn.edit { color: var(--blue); font-weight: 600; }
+.action-btn.edit:hover { background: var(--blue-lt); color: var(--blue); }
 .action-btn.danger:hover { background: var(--red-lt); color: var(--red); }
 
 /* ── Modal ───────────────────────────────────────────────────────── */
@@ -410,6 +414,39 @@ tr:hover td { background: #FAFBFF; }
 .modal h2 { font-size: 17px; margin-bottom: 10px; }
 .modal p  { font-size: 14px; color: var(--text2); margin-bottom: 24px; line-height: 1.5; }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+.photo-manager-modal { max-width: 760px; max-height: 85vh; overflow-y: auto; }
+.photo-manager-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
+.photo-manager-header h2 { margin-bottom: 4px; }
+.student-photo-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 12px;
+  min-height: 140px;
+  margin-bottom: 20px;
+}
+.student-photo-card { position: relative; margin: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--gray-lt); }
+.student-photo-card img { display: block; width: 100%; height: 140px; object-fit: cover; }
+.student-photo-card figcaption { padding: 7px 9px; font-size: 11px; color: var(--text2); background: #fff; }
+.photo-delete-btn {
+  position: absolute; top: 7px; right: 7px;
+  width: 30px; height: 30px; border: none; border-radius: 8px;
+  display: grid; place-items: center; cursor: pointer;
+  background: rgba(255,255,255,.92); color: var(--red);
+  box-shadow: 0 2px 8px rgba(0,0,0,.2);
+}
+.photo-delete-btn:hover { background: var(--red); color: #fff; }
+.photo-delete-btn:disabled { opacity: .65; cursor: wait; }
+.student-photo-empty { grid-column: 1 / -1; text-align: center; color: var(--text2); padding: 36px; border: 2px dashed var(--border); border-radius: 10px; }
+.student-photo-empty i { font-size: 30px; margin-bottom: 8px; }
+.student-photo-empty p { margin: 0; }
+.photo-upload-panel { display: flex; align-items: center; gap: 12px; padding-top: 18px; border-top: 1px solid var(--border); }
+.photo-upload-panel .muted { flex: 1; }
+.photo-upload-hint { margin-top: 10px; margin-bottom: 0; }
+@media (max-width: 600px) {
+  .photo-upload-panel { align-items: stretch; flex-direction: column; }
+  .student-photo-gallery { grid-template-columns: repeat(2, 1fr); }
+}
 
 /* ── Remove-student option cards ─────────────────────────────────── */
 .remove-options {

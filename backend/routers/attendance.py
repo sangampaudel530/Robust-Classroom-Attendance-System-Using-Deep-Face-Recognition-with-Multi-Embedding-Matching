@@ -3,10 +3,13 @@ routers/attendance.py
 Attendance processing and record endpoints.
 """
 
+import asyncio
 import logging
+import os
 import uuid
 from datetime import date, datetime
 import json
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -18,7 +21,7 @@ from backend.database import get_db
 from backend.models.attendance import AttendanceRecord
 from backend.models.student import Student
 from backend.services.excel_export import build_attendance_excel
-from backend.services.video_processor import VideoProcessor
+from backend.services.video_processor import UPLOAD_DIR, VideoProcessor
 from backend.models.evaluation import EvaluationRecord
 
 logger = logging.getLogger(__name__)
@@ -26,6 +29,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/attendance", tags=["attendance"])
 
 _video_processor: Optional[VideoProcessor] = None
+_video_processing_lock = asyncio.Lock()
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".wmv", ".m4v"}
+MAX_VIDEO_BYTES = int(os.getenv("MAX_VIDEO_UPLOAD_MB", "250")) * 1024 * 1024
 
 def get_video_processor() -> VideoProcessor:
     global _video_processor
@@ -39,6 +45,36 @@ def _parse_date(value: str) -> date:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise HTTPException(400, f"Invalid date: {value}") from exc
+
+
+async def _read_video_upload(video: UploadFile) -> tuple[bytes, str]:
+    extension = Path(video.filename or "").suffix.lower() or ".mp4"
+    if extension not in VIDEO_EXTENSIONS:
+        raise HTTPException(400, f"Unsupported video type: {extension}")
+    video_bytes = await video.read(MAX_VIDEO_BYTES + 1)
+    if not video_bytes:
+        raise HTTPException(400, "Video is required.")
+    if len(video_bytes) > MAX_VIDEO_BYTES:
+        raise HTTPException(413, f"Video must be {MAX_VIDEO_BYTES // (1024 * 1024)} MB or smaller.")
+    return video_bytes, extension
+
+
+async def _delete_unreferenced_class_photos(paths: set[str], db: AsyncSession) -> None:
+    upload_root = UPLOAD_DIR.resolve()
+    for path_value in paths:
+        still_used = await db.execute(
+            select(AttendanceRecord.id)
+            .where(AttendanceRecord.class_photo_path == path_value)
+            .limit(1)
+        )
+        if still_used.scalar_one_or_none() is not None:
+            continue
+        photo_path = Path(path_value)
+        try:
+            if photo_path.parent.resolve() == upload_root:
+                photo_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove unused class photo %s", photo_path)
 
 
 async def _records_with_names(class_date: date, db: AsyncSession, active_only: bool = True) -> list:
@@ -71,31 +107,22 @@ async def process_video_attendance(
     date_str: Optional[str] = Form(None, alias="date"),
     db: AsyncSession = Depends(get_db),
 ):
-    video_bytes = await video.read()
-    if not video_bytes:
-        raise HTTPException(400, "Video is required.")
+    video_bytes, extension = await _read_video_upload(video)
 
     class_date = _parse_date(date_str) if date_str else date.today()
     processor = get_video_processor()
 
-    import os
-    ext = ".mp4"
-    if video.filename:
-        _, ext_val = os.path.splitext(video.filename)
-        if ext_val:
-            ext = ext_val
-    
-    try:
-        async def event_generator():
+    async def event_generator():
+        async with _video_processing_lock:
             try:
-                async for event in processor.process_video(video_bytes, class_date, db, filename_ext=ext):
+                async for event in processor.process_video(video_bytes, class_date, db, filename_ext=extension):
                     yield json.dumps(event) + "\n"
-            except Exception as exc:
-                yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
-                
-        return StreamingResponse(event_generator(), media_type="application/x-ndjson")
-    except Exception as exc:
-        raise HTTPException(400, str(exc)) from exc
+            except Exception:
+                await db.rollback()
+                logger.exception("Video attendance processing failed")
+                yield json.dumps({"type": "error", "message": "Video processing failed. Please try again."}) + "\n"
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 
 @router.get("/export/excel")
@@ -106,6 +133,8 @@ async def export_excel(
 ):
     start = _parse_date(start_date) if start_date else None
     end = _parse_date(end_date) if end_date else None
+    if start and end and start > end:
+        raise HTTPException(400, "Start date must be on or before end date.")
     content = await build_attendance_excel(db, start, end)
 
     filename = f"attendance_report_{datetime.now().strftime('%Y%m%d')}.xlsx"
@@ -153,12 +182,18 @@ async def override_attendance(
     status: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
+    status = status.strip().upper()
     if status not in ("P", "A"):
         raise HTTPException(400, "Status must be P or A.")
 
     parsed_date = _parse_date(class_date)
-    record_id = f"{roll_no}_{parsed_date}"
-    record = await db.get(AttendanceRecord, record_id)
+    result = await db.execute(
+        select(AttendanceRecord).where(
+            AttendanceRecord.roll_no == roll_no,
+            AttendanceRecord.date == parsed_date,
+        )
+    )
+    record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(404, f"No attendance record for {roll_no} on {class_date}.")
 
@@ -170,60 +205,30 @@ async def override_attendance(
     return {"roll_no": roll_no, "date": str(parsed_date), "status": status}
 
 
-@router.delete("/{class_date}")
-async def reset_attendance_for_date(
-    class_date: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Delete ALL attendance records for a given date.
-    Used when the user wants to clear and re-process from scratch.
-    """
-    parsed_date = _parse_date(class_date)
-
-    # Count and delete attendance records
-    att_result = await db.execute(
-        select(AttendanceRecord).where(AttendanceRecord.date == parsed_date)
-    )
-    att_records = att_result.scalars().all()
-    records_deleted = len(att_records)
-    for rec in att_records:
-        await db.delete(rec)
-
-    await db.commit()
-
-    logger.info(
-        "Reset attendance for %s — %d records deleted.",
-        parsed_date, records_deleted,
-    )
-    return {
-        "date": str(parsed_date),
-        "records_deleted": records_deleted,
-        "message": f"Attendance for {parsed_date} has been reset.",
-    }
-
-
 @router.delete("/cleanup/orphaned")
 async def cleanup_orphaned_records(db: AsyncSession = Depends(get_db)):
     """
-    Delete attendance records that belong to students who no longer exist
-    or are inactive (soft-deleted). Useful for cleaning stale data.
+    Delete attendance records that belong to students who no longer exist.
+    Inactive students are intentionally retained because soft deletion promises
+    to preserve their attendance history.
     """
-    # Find records where the student is missing or inactive
+    # Find records whose student row no longer exists.
     result = await db.execute(
         select(AttendanceRecord, Student.is_active)
         .join(Student, Student.roll_no == AttendanceRecord.roll_no, isouter=True)
     )
     orphaned = []
     for record, is_active in result.all():
-        if is_active is None or is_active is False:
+        if is_active is None:
             orphaned.append(record)
 
+    photo_paths = {rec.class_photo_path for rec in orphaned if rec.class_photo_path}
     for rec in orphaned:
         await db.delete(rec)
 
     if orphaned:
         await db.commit()
+        await _delete_unreferenced_class_photos(photo_paths, db)
 
     logger.info("Cleaned up %d orphaned attendance records.", len(orphaned))
     return {
@@ -246,30 +251,37 @@ async def evaluate_attendance(
     The system processes the video (without saving to main attendance records), compares with ground truth,
     and returns Precision/Recall/F1 metrics.
     """
-    import os
-    video_bytes = await video.read()
-    if not video_bytes:
-        raise HTTPException(400, "Video is required.")
+    video_bytes, extension = await _read_video_upload(video)
 
     class_date = _parse_date(date_str) if date_str else date.today()
     processor = get_video_processor()
 
-    ext = ".mp4"
-    if video.filename:
-        _, ext_val = os.path.splitext(video.filename)
-        if ext_val:
-            ext = ext_val
-    
     gt_list = [r.strip() for r in ground_truth_rolls.split(",") if r.strip()]
     gt_set = set(gt_list)
+    if not gt_set:
+        raise HTTPException(400, "Enter at least one ground-truth roll number.")
+
+    active_result = await db.execute(select(Student.roll_no).where(Student.is_active.is_(True)))
+    active_rolls = set(active_result.scalars().all())
+    unknown_rolls = sorted(gt_set - active_rolls)
+    if unknown_rolls:
+        raise HTTPException(400, f"Unknown or inactive roll number(s): {', '.join(unknown_rolls)}")
     
     try:
         result = None
-        async for event in processor.process_video(video_bytes, class_date, db, filename_ext=ext):
-            if event["type"] == "result":
-                result = event["data"]
-            elif event["type"] == "error":
-                raise ValueError(event["message"])
+        async with _video_processing_lock:
+            async for event in processor.process_video(
+                video_bytes,
+                class_date,
+                db,
+                filename_ext=extension,
+                persist_records=False,
+                create_active_learning=False,
+            ):
+                if event["type"] == "result":
+                    result = event["data"]
+                elif event["type"] == "error":
+                    raise ValueError(event["message"])
         if result is None:
             raise ValueError("No result returned from video processor")
     except ValueError as exc:
@@ -356,6 +368,32 @@ async def clear_metrics_history(db: AsyncSession = Depends(get_db)):
     await db.commit()
     logger.info("Cleared %d evaluation history records.", count)
     return {"deleted": count, "message": f"Cleared {count} evaluation session(s)."}
+
+
+@router.delete("/{class_date}")
+async def reset_attendance_for_date(
+    class_date: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete all attendance records and unused class photos for one date."""
+    parsed_date = _parse_date(class_date)
+    att_result = await db.execute(
+        select(AttendanceRecord).where(AttendanceRecord.date == parsed_date)
+    )
+    att_records = att_result.scalars().all()
+    records_deleted = len(att_records)
+    photo_paths = {record.class_photo_path for record in att_records if record.class_photo_path}
+    for record in att_records:
+        await db.delete(record)
+
+    await db.commit()
+    await _delete_unreferenced_class_photos(photo_paths, db)
+    logger.info("Reset attendance for %s — %d records deleted.", parsed_date, records_deleted)
+    return {
+        "date": str(parsed_date),
+        "records_deleted": records_deleted,
+        "message": f"Attendance for {parsed_date} has been reset.",
+    }
 
 
 @router.get("/{class_date}")

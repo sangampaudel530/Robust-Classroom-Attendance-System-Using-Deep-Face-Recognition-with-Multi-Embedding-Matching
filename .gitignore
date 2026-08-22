@@ -22,6 +22,8 @@ Thumbs.db
 
 # Database
 face_attendance.db
+*.db-shm
+*.db-wal
 
 # Uploaded classroom videos & generated class photos (keep upload dir empty in git)
 data/uploads/

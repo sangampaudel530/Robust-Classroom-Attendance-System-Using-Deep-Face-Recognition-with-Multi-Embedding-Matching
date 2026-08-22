@@ -1,4 +1,5 @@
 from datetime import date as date_type, datetime
+from pathlib import Path
 
 from sqlalchemy import Date, DateTime, Float, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -22,6 +23,7 @@ class ActiveLearningCandidate(Base):
             "id": self.id,
             "class_date": str(self.class_date),
             "face_crop_path": self.face_crop_path,
+            "face_crop_url": f"/data/active_learning/{Path(self.face_crop_path).name}",
             "suggested_roll_no": self.suggested_roll_no,
             "suggested_name": self.suggested_name,
             "suggested_confidence": self.suggested_confidence,

@@ -58,13 +58,23 @@ async def build_attendance_excel(
         buffer.seek(0)
         return buffer.getvalue()
 
+    # Prevent spreadsheet applications from interpreting user-provided names
+    # or legacy roll numbers as formulas.
+    def safe_excel_text(value):
+        if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+            return "'" + value
+        return value
+
+    df["roll_no"] = df["roll_no"].map(safe_excel_text)
+    df["name"] = df["name"].map(safe_excel_text)
+
     # Normalize date as string YYYY-MM-DD
     df["date"] = df["date"].astype(str)
 
     # 2. Pivot for Attendance Sheet
     df_pivot = df.pivot(index=["roll_no", "name"], columns="date", values="status").reset_index()
-    # Replace NaNs with 'A' (Absent)
-    df_pivot.fillna("A", inplace=True)
+    # Missing records are unknown/not enrolled, not automatically absent.
+    df_pivot.fillna("—", inplace=True)
 
     # Rename columns for presentation
     df_pivot.rename(columns={"roll_no": "Roll No", "name": "Name"}, inplace=True)
