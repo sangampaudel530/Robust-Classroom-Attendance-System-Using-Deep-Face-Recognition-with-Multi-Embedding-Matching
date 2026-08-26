@@ -181,6 +181,21 @@ class FaceRecognizer:
 
         faces = self.app.get(face_crop)
         if not faces:
+            # Active-learning crops contain almost no background and can be as
+            # small as 30-50 px. Add context for candidates created before raw
+            # video embeddings were retained.
+            pad_y = max(20, int(face_crop.shape[0] * 0.45))
+            pad_x = max(20, int(face_crop.shape[1] * 0.45))
+            padded = cv2.copyMakeBorder(
+                face_crop,
+                pad_y,
+                pad_y,
+                pad_x,
+                pad_x,
+                cv2.BORDER_REPLICATE,
+            )
+            faces = self.app.get(padded)
+        if not faces:
             return None
 
         face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))

@@ -30,3 +30,4 @@ data/uploads/
 
 # Active learning face crops (runtime-generated)
 data/active_learning/
+data/active_learning_embeddings/

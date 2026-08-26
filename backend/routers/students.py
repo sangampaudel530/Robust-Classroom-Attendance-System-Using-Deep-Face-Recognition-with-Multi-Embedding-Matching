@@ -33,7 +33,7 @@ from backend.services.student_validation import (
     MAX_PHOTOS_PER_REQUEST,
     normalize_student_info,
 )
-from backend.services.video_processor import UPLOAD_DIR
+from backend.services.video_processor import AL_EMBED_DIR, UPLOAD_DIR
 
 AL_DIR = Path(os.getenv("ACTIVE_LEARNING_DIR", "data/active_learning"))
 AL_DIR.mkdir(parents=True, exist_ok=True)
@@ -51,6 +51,24 @@ def _candidate_crop_path(path_value: str) -> Path:
     if path.parent != AL_DIR.resolve():
         raise HTTPException(400, "Invalid active-learning crop path.")
     return path
+
+
+def _candidate_embedding_path(candidate_id: str) -> Path:
+    return AL_EMBED_DIR / f"{candidate_id}.npy"
+
+
+def _load_candidate_embedding(path: Path) -> np.ndarray | None:
+    if not path.exists():
+        return None
+    try:
+        value = np.load(path, allow_pickle=False).astype(np.float32).reshape(-1)
+    except (OSError, ValueError):
+        logger.warning("Could not load active-learning embedding %s", path)
+        return None
+    if value.size != 512 or not np.all(np.isfinite(value)) or np.linalg.norm(value) < 1e-6:
+        logger.warning("Invalid active-learning embedding %s", path)
+        return None
+    return value
 
 
 @router.get("")
@@ -310,22 +328,51 @@ async def confirm_active_learning_candidate(
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"al_{candidate_id[:8]}.jpg"
     recognizer = FaceRecognizer()
+    embedding_path = _candidate_embedding_path(candidate.id)
+    embedding = _load_candidate_embedding(embedding_path)
+
+    # Compatibility for candidates created before exact video embeddings were
+    # stored. get_embedding adds context around tiny/tight crops before retrying.
+    if embedding is None:
+        crop = cv2.imread(str(src))
+        if crop is not None:
+            embedding = recognizer.get_embedding(crop)
+    if embedding is None:
+        raise HTTPException(
+            422,
+            "This older face crop is too small to train reliably. Reject it and process the video again.",
+        )
+
+    previous_embeddings = recognizer.load_embeddings(roll_no)
+    embeddings_before = len(previous_embeddings) if previous_embeddings is not None else 0
     shutil.copy2(str(src), str(dest))
     try:
-        # Re-compute embeddings for this student to include the new photo.
-        recognizer.update_student_embedding(roll_no)
+        added = recognizer.add_embeddings(roll_no, [embedding])
+        updated_embeddings = recognizer.load_embeddings(roll_no)
+        embeddings_after = len(updated_embeddings) if updated_embeddings is not None else 0
+        if added != 1 or embeddings_after != embeddings_before + 1:
+            raise RuntimeError("Active-learning embedding was not persisted.")
+
         await db.delete(candidate)
         await db.commit()
     except Exception:
         await db.rollback()
         dest.unlink(missing_ok=True)
-        recognizer.update_student_embedding(roll_no)
+        if previous_embeddings is not None:
+            recognizer.save_embeddings(roll_no, list(previous_embeddings))
+        else:
+            recognizer.remove_embedding(roll_no)
         raise
 
     src.unlink(missing_ok=True)
+    embedding_path.unlink(missing_ok=True)
 
     logger.info("Active learning: confirmed candidate %s as student %s.", candidate_id, roll_no)
-    return {"message": f"Face confirmed as {student.name} and model updated."}
+    return {
+        "message": f"Face confirmed as {student.name} and model updated.",
+        "embeddings_before": embeddings_before,
+        "embeddings_after": embeddings_after,
+    }
 
 
 @router.post("/active-learning/reject")
@@ -339,9 +386,11 @@ async def reject_active_learning_candidate(
         raise HTTPException(404, "Candidate not found.")
 
     crop = _candidate_crop_path(candidate.face_crop_path)
+    embedding_path = _candidate_embedding_path(candidate.id)
     await db.delete(candidate)
     await db.commit()
     crop.unlink(missing_ok=True)
+    embedding_path.unlink(missing_ok=True)
 
     logger.info("Active learning: rejected candidate %s.", candidate_id)
     return {"message": "Candidate dismissed."}

@@ -36,6 +36,12 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 AL_DIR = Path(os.getenv("ACTIVE_LEARNING_DIR", "data/active_learning"))
 AL_DIR.mkdir(parents=True, exist_ok=True)
 
+# Candidate embeddings are private training artifacts. Keeping the embedding
+# produced from the original video frame avoids trying to detect the face a
+# second time from a tiny crop during confirmation.
+AL_EMBED_DIR = Path(os.getenv("ACTIVE_LEARNING_EMBED_DIR", "data/active_learning_embeddings"))
+AL_EMBED_DIR.mkdir(parents=True, exist_ok=True)
+
 MATCH_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", "0.50"))
 
 # Target FPS for extraction — GPU allows higher sampling for better accuracy
@@ -46,6 +52,23 @@ TARGET_FPS = max(1, int(os.getenv("VIDEO_TARGET_FPS", "3")))
 MIN_FRAMES_FOR_PRESENT = max(1, int(os.getenv("VIDEO_MIN_FRAMES", "2")))
 MAX_VIDEO_FRAMES = max(1, int(os.getenv("VIDEO_MAX_FRAMES", "60")))
 MAX_FRAME_DIMENSION = max(640, int(os.getenv("VIDEO_MAX_FRAME_DIMENSION", "1920")))
+
+
+def _save_candidate_embedding(candidate_id: str, embedding: np.ndarray) -> Path:
+    """Atomically store one validated embedding for later confirmation."""
+    value = np.asarray(embedding, dtype=np.float32).reshape(-1)
+    if value.size != 512 or not np.all(np.isfinite(value)) or np.linalg.norm(value) < 1e-6:
+        raise ValueError("Invalid active-learning embedding.")
+
+    destination = AL_EMBED_DIR / f"{candidate_id}.npy"
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("wb") as handle:
+            np.save(handle, value, allow_pickle=False)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
 
 class VideoProcessor:
     def __init__(self):
@@ -110,7 +133,7 @@ class VideoProcessor:
         create_active_learning: bool = True,
     ):
         """Process a video file for attendance using multi-frame voting."""
-        
+
         video_filename = f"class_video_{class_date}_{uuid.uuid4().hex[:8]}{filename_ext}"
         video_path = UPLOAD_DIR / video_filename
         
@@ -151,7 +174,10 @@ class VideoProcessor:
         
         total_faces_detected = 0
         
-        al_saved_rolls = set()  # prevent spamming active learning candidates for the same student
+        # Keep only the strongest uncertain observation per suggested student.
+        # It is persisted after voting only if the student was not recognized.
+        pending_al_candidates: Dict[str, Dict] = {}
+        al_artifacts: list[tuple[Path, Path]] = []
 
         # Process each frame
         for i, frame in enumerate(frames):
@@ -197,21 +223,19 @@ class VideoProcessor:
                         box_color = (0, 255, 255) # Yellow for Active Learning Candidate
                         label = f"? {student_map[best_roll]} ({match_score:.2f})"
                         
-                        # Only save one AL candidate per student per video to avoid spam
-                        if create_active_learning and best_roll not in al_saved_rolls and "face_crop" in face_data and face_data["face_crop"] is not None:
-                            crop_id = uuid.uuid4().hex
-                            crop_filename = f"{crop_id}.jpg"
-                            crop_path = AL_DIR / crop_filename
-                            if cv2.imwrite(str(crop_path), face_data["face_crop"]):
-                                db.add(ActiveLearningCandidate(
-                                    id=crop_id,
-                                    class_date=class_date,
-                                    face_crop_path=str(crop_path),
-                                    suggested_roll_no=best_roll,
-                                    suggested_name=student_map[best_roll],
-                                    suggested_confidence=match_score,
-                                ))
-                                al_saved_rolls.add(best_roll)
+                        if (
+                            create_active_learning
+                            and face_data.get("face_crop") is not None
+                            and (
+                                best_roll not in pending_al_candidates
+                                or match_score > pending_al_candidates[best_roll]["match_score"]
+                            )
+                        ):
+                            pending_al_candidates[best_roll] = {
+                                "match_score": match_score,
+                                "face_crop": face_data["face_crop"].copy(),
+                                "embedding": np.asarray(emb, dtype=np.float32).copy(),
+                            }
 
                 if bbox is not None:
                     x1, y1, x2, y2 = map(int, bbox[:4])
@@ -248,6 +272,35 @@ class VideoProcessor:
                     "frames_seen": len(data)
                 }
 
+        # Do not create a misleading candidate from an early weak frame when
+        # later frames already provided enough positive votes. For absent
+        # students, persist the strongest uncertain observation and its exact
+        # original-frame embedding.
+        for suggested_roll, candidate_data in pending_al_candidates.items():
+            if attendance[suggested_roll]["status"] == "P":
+                continue
+            crop_id = uuid.uuid4().hex
+            crop_path = AL_DIR / f"{crop_id}.jpg"
+            if not cv2.imwrite(str(crop_path), candidate_data["face_crop"]):
+                continue
+            try:
+                embedding_path = _save_candidate_embedding(
+                    crop_id, candidate_data["embedding"]
+                )
+            except (OSError, ValueError):
+                crop_path.unlink(missing_ok=True)
+                logger.exception("Could not save active-learning embedding for %s", crop_id)
+                continue
+            db.add(ActiveLearningCandidate(
+                id=crop_id,
+                class_date=class_date,
+                face_crop_path=str(crop_path),
+                suggested_roll_no=suggested_roll,
+                suggested_name=student_map[suggested_roll],
+                suggested_confidence=candidate_data["match_score"],
+            ))
+            al_artifacts.append((crop_path, embedding_path))
+
         if persist_records:
             old_photo_paths = set()
             for roll_no, info in attendance.items():
@@ -269,7 +322,13 @@ class VideoProcessor:
                         class_photo_path=str(photo_path),
                     ))
 
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception:
+                for crop_path, embedding_path in al_artifacts:
+                    crop_path.unlink(missing_ok=True)
+                    embedding_path.unlink(missing_ok=True)
+                raise
 
             # Remove superseded class frames only when no record still uses them.
             for old_path_value in old_photo_paths:

@@ -4,6 +4,7 @@ FastAPI application entry point.
 Run with: uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 """
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -16,10 +17,10 @@ from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 from backend.database import init_db
-from backend.routers.attendance import router as attendance_router
+from backend.routers.attendance import get_video_processor, router as attendance_router
 from backend.routers.students import router as students_router
 from backend.routers.student_updates import router as student_updates_router
-from backend.services.recognizer import EMBED_DIR, PHOTO_DIR
+from backend.services.recognizer import EMBED_DIR, PHOTO_DIR, load_gallery
 from backend.services.video_processor import AL_DIR, UPLOAD_DIR
 import backend.models.attendance  # noqa: F401
 import backend.models.student  # noqa: F401
@@ -71,6 +72,15 @@ async def lifespan(app: FastAPI):
     providers = ort.get_available_providers()
     has_gpu = "CUDAExecutionProvider" in providers
     logger.info("ONNX providers: %s | %s", providers, "GPU ENABLED" if has_gpu else "CPU ONLY (install onnxruntime-gpu for GPU)")
+
+    # Pay the one-time InsightFace/GPU and gallery initialization cost before
+    # the web UI becomes available. Video requests can then begin extracting
+    # and processing frames immediately instead of pausing on "Starting".
+    logger.info("Loading face-recognition engine...")
+    await asyncio.to_thread(get_video_processor)
+    await asyncio.to_thread(load_gallery)
+    logger.info("Face-recognition engine ready.")
+
     logger.info("Face Attendance System started.")
     yield
     logger.info("Shutting down.")

@@ -621,7 +621,7 @@ async function processVideo() {
                 $("#vr-frames").textContent  = data.frames_processed || "—";
                 $("#vr-faces").textContent   = data.faces_detected;
                 
-                $("#vid-details-wrap").innerHTML = buildAttTable(data.details);
+                $("#vid-details-wrap").innerHTML = buildAttTable(data.details, false, false, true);
                 result.style.display = "block";
                 $("#vid-clear-btn").style.display = "inline-flex";
                 toast(`Done: ${data.present} present, ${data.absent} absent.`, "success");
@@ -674,10 +674,10 @@ function attachOverrideEvents(date) {
   });
 }
 
-function buildAttTable(records, withOverride = false, showDate = false) {
+function buildAttTable(records, withOverride = false, showDate = false, showConfidence = false) {
   if (!records.length) return '<p class="muted">No records.</p>';
   return `<div class="table-wrap"><table>
-    <thead><tr>${showDate ? "<th>Date</th>" : ""}<th>Roll No</th><th>Name</th><th>Status</th><th>Confidence</th>${withOverride ? "<th>Override</th>" : ""}</tr></thead>
+    <thead><tr>${showDate ? "<th>Date</th>" : ""}<th>Roll No</th><th>Name</th><th>Status</th>${showConfidence ? "<th>Confidence</th>" : ""}${withOverride ? "<th>Override</th>" : ""}</tr></thead>
     <tbody>${records.map(r => {
       const confPct = Math.max(0, Math.min(100, r.confidence ? Math.round(r.confidence * 100) : 0));
       return `<tr>
@@ -685,7 +685,7 @@ function buildAttTable(records, withOverride = false, showDate = false) {
         <td><strong>${escapeHtml(r.roll_no)}</strong></td>
         <td>${escapeHtml(r.name || "—")}</td>
         <td><span class="pill ${r.status === "P" ? "pill-p" : "pill-a"}">${r.status === "P" ? "Present" : "Absent"}</span></td>
-        <td><div class="conf-bar-wrap"><div class="conf-bar"><div class="conf-bar-fill" style="width:${confPct}%"></div></div><span style="font-size:12px;color:var(--text2)">${confPct}%</span></div></td>
+        ${showConfidence ? `<td><div class="conf-bar-wrap"><div class="conf-bar"><div class="conf-bar-fill" style="width:${confPct}%"></div></div><span style="font-size:12px;color:var(--text2)">${confPct}%</span></div></td>` : ""}
         ${withOverride ? `<td>
           <button class="action-btn" data-override data-roll="${escapeHtml(r.roll_no)}" data-status="P" title="Mark Present">✅</button>
           <button class="action-btn" data-override data-roll="${escapeHtml(r.roll_no)}" data-status="A" title="Mark Absent">❌</button>
@@ -706,12 +706,17 @@ async function loadActiveLearningCandidates() {
       wrap.innerHTML = `<div class="result-box success" style="margin-top:0"><i class="fa-solid fa-circle-check"></i> <b>All caught up!</b> No unrecognized face candidates pending.</div>`;
       return;
     }
-    let html = `<div class="al-candidates-grid">`;
+    let html = `<div class="al-bulk-toolbar">
+      <label class="al-select-all-label"><input type="checkbox" id="al-select-all"/> Select all <span id="al-selected-count">(0 selected)</span></label>
+      <button class="btn btn-primary btn-sm" id="al-confirm-selected"><i class="fa-solid fa-circle-check"></i> Confirm & Train Selected</button>
+      <button class="btn btn-danger btn-sm" id="al-reject-selected"><i class="fa-solid fa-trash"></i> Delete Selected</button>
+    </div><div class="al-candidates-grid">`;
     candidates.forEach(c => {
       const candidateId = escapeHtml(c.id);
       const options = students.map(s => `<option value="${escapeHtml(s.roll_no)}" ${s.roll_no === c.suggested_roll_no ? "selected" : ""}>${escapeHtml(s.roll_no)} — ${escapeHtml(s.name)}</option>`).join("");
       const confidence = Number.isFinite(Number(c.suggested_confidence)) ? Math.round(Number(c.suggested_confidence) * 100) : 0;
       html += `<div class="al-candidate-card" id="al-candidate-${candidateId}">
+        <label class="al-card-check"><input type="checkbox" class="al-candidate-checkbox" value="${candidateId}"/> Select</label>
         <div class="al-candidate-row">
           <img src="${escapeHtml(c.face_crop_url)}" class="al-candidate-crop" alt="Face crop"/>
           <div class="al-candidate-info">
@@ -733,13 +738,50 @@ async function loadActiveLearningCandidates() {
     });
     html += "</div>";
     wrap.innerHTML = html;
+    updateActiveLearningSelectionCount();
+    wrap.onchange = event => {
+      if (event.target.matches(".al-candidate-checkbox")) updateActiveLearningSelectionCount();
+      if (event.target.id === "al-select-all") {
+        $$(".al-candidate-checkbox").forEach(checkbox => { checkbox.checked = event.target.checked; });
+        updateActiveLearningSelectionCount();
+      }
+    };
     wrap.onclick = event => {
       const button = event.target.closest("[data-candidate-action]");
-      if (!button) return;
-      if (button.dataset.candidateAction === "confirm") confirmCandidate(button.dataset.candidateId);
-      else rejectCandidate(button.dataset.candidateId);
+      if (button) {
+        if (button.dataset.candidateAction === "confirm") confirmCandidate(button.dataset.candidateId);
+        else rejectCandidate(button.dataset.candidateId);
+        return;
+      }
+      if (event.target.closest("#al-confirm-selected")) confirmSelectedCandidates();
+      else if (event.target.closest("#al-reject-selected")) rejectSelectedCandidates();
     };
   } catch (e) { wrap.innerHTML = `<p class="muted" style="color:var(--red)">Error: ${escapeHtml(e.message)}</p>`; }
+}
+
+function selectedActiveLearningIds() {
+  return $$(".al-candidate-checkbox:checked").map(checkbox => checkbox.value);
+}
+
+function updateActiveLearningSelectionCount() {
+  const selected = selectedActiveLearningIds().length;
+  const total = $$(".al-candidate-checkbox").length;
+  const label = $("#al-selected-count");
+  const selectAll = $("#al-select-all");
+  if (label) label.textContent = `(${selected} selected)`;
+  if (selectAll) {
+    selectAll.checked = total > 0 && selected === total;
+    selectAll.indeterminate = selected > 0 && selected < total;
+  }
+}
+
+async function submitCandidateConfirmation(id) {
+  const roll = $(`#al-select-${id}`).value;
+  if (!roll) throw new Error("Select a student first.");
+  const fd = new FormData();
+  fd.append("candidate_id", id);
+  fd.append("roll_no", roll);
+  return api("/students/active-learning/confirm", { method: "POST", body: fd });
 }
 
 async function confirmCandidate(id) {
@@ -747,11 +789,32 @@ async function confirmCandidate(id) {
   if (!roll) { toast("Select a student first.", "error"); return; }
   const btn = $(`#al-confirm-btn-${id}`); btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
   try {
-    const fd = new FormData(); fd.append("candidate_id", id); fd.append("roll_no", roll);
-    await api("/students/active-learning/confirm", { method: "POST", body: fd });
+    await submitCandidateConfirmation(id);
     toast("Model updated!", "success");
     setTimeout(loadActiveLearningCandidates, 300);
   } catch (e) { toast(e.message, "error"); btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-circle-check"></i> Confirm & Train'; }
+}
+
+async function confirmSelectedCandidates() {
+  const ids = selectedActiveLearningIds();
+  if (!ids.length) { toast("Select at least one candidate.", "error"); return; }
+  const missingStudent = ids.find(id => !$(`#al-select-${id}`).value);
+  if (missingStudent) { toast("Every selected candidate must have a student assigned.", "error"); return; }
+  if (!confirm(`Confirm and train ${ids.length} selected candidate(s)?`)) return;
+
+  const button = $("#al-confirm-selected");
+  button.disabled = true;
+  button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Training…';
+  let completed = 0;
+  const errors = [];
+  for (const id of ids) {
+    try { await submitCandidateConfirmation(id); completed++; }
+    catch (error) { errors.push(error.message); }
+  }
+  if (completed) toast(`Trained ${completed} candidate(s).`, "success");
+  if (errors.length) toast(`${errors.length} candidate(s) failed: ${errors[0]}`, "error");
+  loadDashboard();
+  await loadActiveLearningCandidates();
 }
 
 async function rejectCandidate(id) {
@@ -761,6 +824,28 @@ async function rejectCandidate(id) {
     await api("/students/active-learning/reject", { method: "POST", body: fd });
     toast("Candidate ignored.", "success"); setTimeout(loadActiveLearningCandidates, 300);
   } catch (e) { toast(e.message, "error"); }
+}
+
+async function rejectSelectedCandidates() {
+  const ids = selectedActiveLearningIds();
+  if (!ids.length) { toast("Select at least one candidate.", "error"); return; }
+  if (!confirm(`Permanently delete ${ids.length} selected face candidate(s)?`)) return;
+
+  const button = $("#al-reject-selected");
+  button.disabled = true;
+  button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Deleting…';
+  let completed = 0;
+  const errors = [];
+  for (const id of ids) {
+    try {
+      const fd = new FormData(); fd.append("candidate_id", id);
+      await api("/students/active-learning/reject", { method: "POST", body: fd });
+      completed++;
+    } catch (error) { errors.push(error.message); }
+  }
+  if (completed) toast(`Deleted ${completed} candidate(s).`, "success");
+  if (errors.length) toast(`${errors.length} candidate(s) failed: ${errors[0]}`, "error");
+  await loadActiveLearningCandidates();
 }
 
 // ── Metrics (NEW) ─────────────────────────────────────────────────
