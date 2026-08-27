@@ -17,6 +17,32 @@ FaceAttend is a locally hosted classroom-attendance application that recognizes 
 |---|---|
 | ![Enroll a student](docs/screenshots/enroll-student.png) | ![Process a classroom video](docs/screenshots/video-attendance.png) |
 
+## Example Video Inference
+
+`hostel_room.mp4` was evaluated locally through the same production video pipeline with attendance persistence and Active Learning disabled.
+
+| Property | Measured result |
+|---|---:|
+| Resolution | 1920 × 1080 |
+| Video duration | 5.00 s |
+| Source video | 30 FPS / 150 frames |
+| Sampled for inference | 3 FPS / 15 frames |
+| Face observations | 166 |
+| Local enrolled gallery | 18 students |
+| Predicted attendance | 11 present / 7 absent |
+| Processing time | 34.78 s |
+| Processing throughput | 0.43 sampled frames/s |
+| Real-time factor | 0.14× |
+| Runtime hardware | CUDA — NVIDIA GeForce RTX 3050 Laptop GPU, 4 GB |
+
+This is an inference demonstration, not an accuracy measurement, because no ground-truth attendance labels were supplied. Face observations are detections accumulated across sampled frames, not 166 unique people. Timing excludes one-time model/FAISS initialization and browser upload, but includes frame extraction, detection, embedding generation, matching and multi-frame voting. The source video and biometric gallery are intentionally excluded from Git.
+
+Run the same non-persistent benchmark on another local video:
+
+```powershell
+python -m scripts.benchmark_video path\to\classroom.mp4 --json
+```
+
 ## Highlights
 
 - Enroll each student from multiple face images and retain every valid 512-dimensional embedding.
@@ -104,6 +130,7 @@ The application loads only the detection and recognition components from Buffalo
 ├── frontend/
 │   ├── templates/index.html        # Single-page teacher interface
 │   └── static/                     # CSS, JavaScript and favicon
+├── scripts/benchmark_video.py       # Non-persistent inference benchmark
 ├── data/                            # Local runtime data; contents are ignored
 ├── docs/screenshots/                # Public README images
 ├── .env.example                     # Supported configuration
