@@ -272,6 +272,10 @@ Use a Python version and platform for which `faiss-cpu` provides a wheel, or ins
 - Roshan Koirala
 - Sahas Khadka
 
+## License
+
+The project source code is released under the [MIT License](LICENSE). Third-party libraries and pretrained InsightFace models remain subject to their respective licenses and usage conditions.
+
 ## Acknowledgements
 
 - [InsightFace](https://github.com/deepinsight/insightface) for face-analysis models and tooling
