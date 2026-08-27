@@ -76,6 +76,7 @@ function initNav() {
       if (!target) return;
       link.classList.add("active");
       target.classList.add("active");
+      if (window.location.hash !== `#${tab}`) history.replaceState(null, "", `#${tab}`);
       if (tab === "students")        loadStudents();
       if (tab === "dashboard")       loadDashboard();
       if (tab === "records")         { const el = $("#records-date"); if (el && !el.value) el.value = todayStr(); }
@@ -1006,5 +1007,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if ($("#eval-date")) $("#eval-date").value = today;
   if ($("#records-date")) $("#records-date").value = today;
   $("#today-badge").textContent = fmtDate(today);
-  loadDashboard();
+  const requestedTab = window.location.hash.slice(1);
+  const requestedLink = requestedTab ? $(`.nav-item[data-tab="${requestedTab}"]`) : null;
+  if (requestedLink) requestedLink.click();
+  else loadDashboard();
 });

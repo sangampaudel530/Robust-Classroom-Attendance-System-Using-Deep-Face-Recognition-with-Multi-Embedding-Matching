@@ -1,33 +1,53 @@
-# Virtual environment
+# Python environments and caches
 .venv/
 venv/
-
-
-#environment
-.env
-
-# Python cache
+env/
 __pycache__/
-*.pyc
-
-# Jupyter Notebook checkpoints
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .ipynb_checkpoints/
 
-# Logs
-*.log
+# Local configuration and editor files
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.code-workspace
 
-# OS files
+# Logs, exports and operating-system files
+*.log
+*.xlsx
 .DS_Store
 Thumbs.db
 
-# Database
+# Local database and SQLite sidecar files
 face_attendance.db
+face_attendance.db-shm
+face_attendance.db-wal
 *.db-shm
 *.db-wal
 
-# Uploaded classroom videos & generated class photos (keep upload dir empty in git)
-data/uploads/
+# Runtime uploads and biometric data — never publish these files
+data/embeddings/*
+!data/embeddings/.gitkeep
+data/student_photos/*
+!data/student_photos/.gitkeep
+data/uploads/*
+!data/uploads/.gitkeep
+data/active_learning/*
+!data/active_learning/.gitkeep
+data/active_learning_embeddings/*
+!data/active_learning_embeddings/.gitkeep
 
-# Active learning face crops (runtime-generated)
-data/active_learning/
-data/active_learning_embeddings/
+# Local videos and optional model binaries
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+models/*

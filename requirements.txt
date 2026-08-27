@@ -1,22 +1,22 @@
-# FastAPI Web Framework
-fastapi
-uvicorn[standard]
-python-multipart
+# Web application
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.12,<1
 
 # Database
-sqlalchemy
-aiosqlite
+sqlalchemy>=2.0,<3
+aiosqlite>=0.20,<1
 
-# Environment Variables
-python-dotenv
+# Configuration
+python-dotenv>=1.0,<2
 
-# Computer Vision & Data
-opencv-python
-numpy
-pandas
-openpyxl
+# Computer vision, reports and numerical processing
+opencv-python>=4.10,<6
+numpy>=1.26,<3
+pandas>=2.2,<4
+openpyxl>=3.1,<4
 
-# Face Recognition & AI Models
-insightface
-onnxruntime  # CPU runtime, works everywhere. For GPU: pip install onnxruntime-gpu
-faiss-cpu
+# Face recognition and exact vector search
+insightface>=0.7.3,<2
+onnxruntime>=1.18,<2
+faiss-cpu>=1.8,<2
