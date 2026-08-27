@@ -86,11 +86,50 @@ class FaceDetector:
     # -- Tiled detection for group photos ------------------------------------
 
     def _detect_single_pass(self, image: np.ndarray, det_size: tuple) -> list:
-        """Run InsightFace detection at a given det_size. Returns list of face objects."""
-        if self._last_det_size != det_size:
-            self.app.prepare(ctx_id=self._ctx_id, det_size=det_size)
+        """Run only detection and retain inputs needed for later recognition.
+
+        Recognition is deferred until after cross-pass NMS so duplicate faces
+        from full-image and tiled passes are not embedded unnecessarily.
+        """
+        current_size = tuple(self.app.det_model.input_size or ())
+        if self._last_det_size != det_size or current_size != det_size:
+            # Only the detector input changes between passes. Calling the
+            # FaceAnalysis-level prepare method also loops over other models.
+            self.app.det_model.prepare(
+                self._ctx_id,
+                input_size=det_size,
+                det_thresh=self.app.det_thresh,
+            )
+            self.app.det_size = det_size
             self._last_det_size = det_size
-        return self.app.get(image)
+        bboxes, keypoints = self.app.det_model.detect(image)
+        return [
+            {
+                "bbox": row[:4].astype(float),
+                "score": float(row[4]),
+                "kps": keypoints[index].copy() if keypoints is not None else None,
+                "embedding_image": image,
+            }
+            for index, row in enumerate(bboxes)
+        ]
+
+    def _get_embedding(self, detection: Dict[str, Any]) -> Optional[np.ndarray]:
+        """Calculate ArcFace once for a detection that survived final NMS."""
+        keypoints = detection.get("kps")
+        source_image = detection.get("embedding_image")
+        recognition_model = self.app.models.get("recognition")
+        if keypoints is None or source_image is None or recognition_model is None:
+            return None
+
+        from insightface.app.common import Face
+
+        face = Face(
+            bbox=np.asarray(detection["bbox"], dtype=np.float32),
+            kps=np.asarray(keypoints, dtype=np.float32),
+            det_score=float(detection.get("score", 0.5)),
+        )
+        recognition_model.get(source_image, face)
+        return getattr(face, "normed_embedding", None)
 
     def _detect_tiled(self, image: np.ndarray, tile_overlap: float = 0.25) -> list:
         """Detect faces using overlapping tiles for large group images.
@@ -141,30 +180,24 @@ class FaceDetector:
 
                 for face in faces:
                     # Map bbox back to original image coordinates
-                    bbox = face.bbox.copy()
+                    bbox = face["bbox"].copy()
                     bbox[0] += x_start
                     bbox[1] += y_start
                     bbox[2] += x_start
                     bbox[3] += y_start
 
-                    # Get detection score
-                    score = getattr(face, "det_score", 0.5)
-                    if isinstance(score, np.ndarray):
-                        score = float(score)
+                    score = face["score"]
 
                     all_boxes.append(bbox)
                     all_scores.append(score)
 
-                    # Get embedding (normed preferred)
-                    emb = getattr(face, "normed_embedding", None)
-                    if emb is None:
-                        emb = getattr(face, "embedding", None)
-
                     all_faces_data.append({
                         "bbox": bbox,
-                        "embedding": emb,
-                        "landmarks": getattr(face, "landmark", None),
-                        "pose": getattr(face, "pose", None),
+                        "score": score,
+                        # Keep tile-local landmarks/source pixels so the aligned
+                        # recognition crop matches the previous implementation.
+                        "kps": face["kps"],
+                        "embedding_image": tile,
                     })
 
         if not all_boxes:
@@ -220,14 +253,11 @@ class FaceDetector:
             # Strategy 1: Full image pass
             full_faces = self._detect_full_image(image)
             for face in full_faces:
-                emb = getattr(face, "normed_embedding", None)
-                if emb is None:
-                    emb = getattr(face, "embedding", None)
                 raw_detections.append({
-                    "bbox": face.bbox.astype(float),
-                    "embedding": emb,
-                    "score": float(getattr(face, "det_score", 0.5)),
-                    "pose": getattr(face, "pose", None),
+                    "bbox": face["bbox"],
+                    "score": face["score"],
+                    "kps": face["kps"],
+                    "embedding_image": face["embedding_image"],
                 })
 
             # Strategy 2: Tiled detection (catches missed small faces)
@@ -236,9 +266,9 @@ class FaceDetector:
                 for face_data in tiled_faces:
                     raw_detections.append({
                         "bbox": face_data["bbox"].astype(float) if isinstance(face_data["bbox"], np.ndarray) else np.array(face_data["bbox"], dtype=float),
-                        "embedding": face_data["embedding"],
                         "score": 0.5,
-                        "pose": face_data.get("pose", None),
+                        "kps": face_data["kps"],
+                        "embedding_image": face_data["embedding_image"],
                     })
 
             # Merge with NMS
@@ -253,14 +283,11 @@ class FaceDetector:
             det_size = (640, 640)
             faces = self._detect_single_pass(image, det_size)
             for face in faces:
-                emb = getattr(face, "normed_embedding", None)
-                if emb is None:
-                    emb = getattr(face, "embedding", None)
                 raw_detections.append({
-                    "bbox": face.bbox.astype(float),
-                    "embedding": emb,
-                    "score": float(getattr(face, "det_score", 0.5)),
-                    "pose": getattr(face, "pose", None),
+                    "bbox": face["bbox"],
+                    "score": face["score"],
+                    "kps": face["kps"],
+                    "embedding_image": face["embedding_image"],
                 })
 
         is_clahe_used = False
@@ -273,16 +300,14 @@ class FaceDetector:
             faces = self._detect_single_pass(enhanced, det_size)
             is_clahe_used = True
             for face in faces:
-                emb = getattr(face, "normed_embedding", None)
-                if emb is None:
-                    emb = getattr(face, "embedding", None)
                 raw_detections.append({
-                    "bbox": face.bbox.astype(float),
-                    "embedding": emb,
-                    "score": float(getattr(face, "det_score", 0.5)),
+                    "bbox": face["bbox"],
+                    "score": face["score"],
+                    "kps": face["kps"],
+                    "embedding_image": enhanced,
                 })
 
-        # Build final results with face crops
+        # Build final results with face crops.
         results: List[Dict[str, Any]] = []
         for det in raw_detections:
             bbox = det["bbox"]
@@ -301,8 +326,9 @@ class FaceDetector:
             # Always crop from ORIGINAL image
             face_crop = image[y1:y2, x1:x2]
 
-            # If CLAHE was used, embeddings came from distorted image — invalidate
-            embedding = det["embedding"] if not is_clahe_used else None
+            # Preserve prior behavior for CLAHE: do not recognize from pixels
+            # whose contrast was altered. Otherwise embed only final NMS faces.
+            embedding = self._get_embedding(det) if not is_clahe_used else None
 
             results.append({
                 "bbox": [x1, y1, x2, y2],

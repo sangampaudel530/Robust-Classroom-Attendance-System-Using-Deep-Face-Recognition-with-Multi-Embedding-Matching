@@ -135,7 +135,13 @@ def get_shared_app():
     if _shared_app is None:
         from insightface.app import FaceAnalysis
 
-        _shared_app = FaceAnalysis(name="buffalo_l")
+        # Attendance only consumes detector landmarks and ArcFace embeddings.
+        # Loading Buffalo-L's age/gender and dense landmark networks makes every
+        # detected face run through models whose outputs are never used.
+        _shared_app = FaceAnalysis(
+            name="buffalo_l",
+            allowed_modules=["detection", "recognition"],
+        )
         import onnxruntime as ort
         ctx_id = 0 if "CUDAExecutionProvider" in ort.get_available_providers() else -1
         _shared_app.prepare(ctx_id=ctx_id, det_size=(640, 640))

@@ -52,6 +52,9 @@ TARGET_FPS = max(1, int(os.getenv("VIDEO_TARGET_FPS", "3")))
 MIN_FRAMES_FOR_PRESENT = max(1, int(os.getenv("VIDEO_MIN_FRAMES", "2")))
 MAX_VIDEO_FRAMES = max(1, int(os.getenv("VIDEO_MAX_FRAMES", "60")))
 MAX_FRAME_DIMENSION = max(640, int(os.getenv("VIDEO_MAX_FRAME_DIMENSION", "1920")))
+# Live preview is presentation-only. Recognition still processes every sampled
+# frame, while JPEG/Base64 work is limited to roughly one preview per second.
+VIDEO_PREVIEW_EVERY = max(1, int(os.getenv("VIDEO_PREVIEW_EVERY", str(TARGET_FPS))))
 
 
 def _save_candidate_embedding(candidate_id: str, embedding: np.ndarray) -> Path:
@@ -101,10 +104,15 @@ class VideoProcessor:
         frames = []
         frame_idx = 0
         while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
+            # Decode advances for every source frame, but only retrieve/convert
+            # sampled frames to BGR. This preserves the exact sample indices
+            # while avoiding large 4K array creation for discarded frames.
+            if not cap.grab():
                 break
             if frame_idx % stride == 0:
+                ret, frame = cap.retrieve()
+                if not ret:
+                    break
                 height, width = frame.shape[:2]
                 max_dimension = max(height, width)
                 if max_dimension > MAX_FRAME_DIMENSION:
@@ -148,8 +156,10 @@ class VideoProcessor:
             return
 
         # Get active students
-        result = await db.execute(select(Student).where(Student.is_active.is_(True)))
-        students: List[Student] = result.scalars().all()
+        result = await db.execute(
+            select(Student.roll_no, Student.name).where(Student.is_active.is_(True))
+        )
+        students = result.all()
         if not students:
             video_path.unlink()
             yield {"type": "error", "message": "No enrolled students found."}
@@ -182,9 +192,15 @@ class VideoProcessor:
         # Process each frame
         for i, frame in enumerate(frames):
             logger.info("Processing frame %d/%d", i + 1, len(frames))
-            
-            # Visual display frame
-            display_frame = frame.copy()
+
+            # Preview rendering does not participate in recognition. Avoid a
+            # full-frame copy and JPEG/Base64 conversion on intermediate frames.
+            should_preview = (
+                i == 0
+                or i == len(frames) - 1
+                or (i + 1) % VIDEO_PREVIEW_EVERY == 0
+            )
+            display_frame = frame.copy() if should_preview else None
             
             # Use tiled detection only when GPU is available; skip on CPU for speed
             detected_faces = self.detector.detect(frame, is_group=True, video_mode=not self._use_gpu)
@@ -196,7 +212,7 @@ class VideoProcessor:
                 emb = face_data.get("embedding")
                 
                 if emb is None:
-                    if bbox is not None:
+                    if bbox is not None and display_frame is not None:
                         x1, y1, x2, y2 = map(int, bbox[:4])
                         cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
                     continue
@@ -237,19 +253,31 @@ class VideoProcessor:
                                 "embedding": np.asarray(emb, dtype=np.float32).copy(),
                             }
 
-                if bbox is not None:
+                if bbox is not None and display_frame is not None:
                     x1, y1, x2, y2 = map(int, bbox[:4])
                     cv2.rectangle(display_frame, (x1, y1), (x2, y2), box_color, 2)
                     cv2.putText(display_frame, label, (x1, max(y1-10, 10)), 
                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
 
-            # Yield the frame for live web streaming
-            _, buffer = cv2.imencode('.jpg', display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
-            b64_img = base64.b64encode(buffer).decode('utf-8')
+            progress = int((i + 1) / len(frames) * 100)
+            if display_frame is not None:
+                encoded, buffer = cv2.imencode(
+                    ".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
+                )
+                if encoded:
+                    yield {
+                        "type": "frame",
+                        "image": base64.b64encode(buffer).decode("utf-8"),
+                        "progress": progress,
+                        "sampled_frame": i + 1,
+                        "sampled_frames_total": len(frames),
+                    }
+                    continue
             yield {
-                "type": "frame",
-                "image": b64_img,
-                "progress": int((i + 1) / len(frames) * 100)
+                "type": "progress",
+                "progress": progress,
+                "sampled_frame": i + 1,
+                "sampled_frames_total": len(frames),
             }
 
         # Aggregate results

@@ -557,8 +557,17 @@ async function processVideo() {
   // Pending frame queue for smooth rendering via requestAnimationFrame
   let pendingFrame = null;
   let rafScheduled = false;
-  let frameCount = 0;
   let gotResult = false;
+
+  function updateVideoProgress(msg) {
+    const pct = msg.progress ?? 0;
+    const current = Number(msg.sampled_frame);
+    const total = Number(msg.sampled_frames_total);
+    const frameText = Number.isFinite(current) && Number.isFinite(total)
+      ? ` (sampled frame ${current} of ${total})`
+      : "";
+    spinner.querySelector("p").textContent = `Processing… ${pct}%${frameText}`;
+  }
 
   function renderFrame() {
     if (pendingFrame) {
@@ -604,12 +613,12 @@ async function processVideo() {
             try { msg = JSON.parse(line); } catch (e) { continue; }
             
             if (msg.type === "frame") {
-                frameCount++;
                 // Queue the latest frame — requestAnimationFrame will render it
                 scheduleFrame(msg.image);
-                // Update progress text
-                const pct = msg.progress ?? 0;
-                spinner.querySelector("p").textContent = `Processing… ${pct}% (frame ${frameCount})`;
+                updateVideoProgress(msg);
+
+            } else if (msg.type === "progress") {
+                updateVideoProgress(msg);
 
             } else if (msg.type === "error") {
                 throw new Error(msg.message);
@@ -708,7 +717,7 @@ async function loadActiveLearningCandidates() {
     }
     let html = `<div class="al-bulk-toolbar">
       <label class="al-select-all-label"><input type="checkbox" id="al-select-all"/> Select all <span id="al-selected-count">(0 selected)</span></label>
-      <button class="btn btn-primary btn-sm" id="al-confirm-selected"><i class="fa-solid fa-circle-check"></i> Confirm & Train Selected</button>
+      <button class="btn btn-primary btn-sm" id="al-confirm-selected"><i class="fa-solid fa-circle-check"></i> Confirm & Improve Selected</button>
       <button class="btn btn-danger btn-sm" id="al-reject-selected"><i class="fa-solid fa-trash"></i> Delete Selected</button>
     </div><div class="al-candidates-grid">`;
     candidates.forEach(c => {
@@ -732,7 +741,7 @@ async function loadActiveLearningCandidates() {
         </div>
         <div class="al-candidate-actions">
           <button class="btn btn-ghost btn-sm" data-candidate-action="reject" data-candidate-id="${candidateId}"><i class="fa-solid fa-trash"></i> Ignore</button>
-          <button class="btn btn-primary btn-sm" data-candidate-action="confirm" data-candidate-id="${candidateId}" id="al-confirm-btn-${candidateId}"><i class="fa-solid fa-circle-check"></i> Confirm & Train</button>
+          <button class="btn btn-primary btn-sm" data-candidate-action="confirm" data-candidate-id="${candidateId}" id="al-confirm-btn-${candidateId}"><i class="fa-solid fa-circle-check"></i> Confirm & Improve Recognition</button>
         </div>
       </div>`;
     });
@@ -790,9 +799,9 @@ async function confirmCandidate(id) {
   const btn = $(`#al-confirm-btn-${id}`); btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
   try {
     await submitCandidateConfirmation(id);
-    toast("Model updated!", "success");
+    toast("Recognition gallery updated!", "success");
     setTimeout(loadActiveLearningCandidates, 300);
-  } catch (e) { toast(e.message, "error"); btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-circle-check"></i> Confirm & Train'; }
+  } catch (e) { toast(e.message, "error"); btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-circle-check"></i> Confirm & Improve Recognition'; }
 }
 
 async function confirmSelectedCandidates() {
@@ -800,18 +809,18 @@ async function confirmSelectedCandidates() {
   if (!ids.length) { toast("Select at least one candidate.", "error"); return; }
   const missingStudent = ids.find(id => !$(`#al-select-${id}`).value);
   if (missingStudent) { toast("Every selected candidate must have a student assigned.", "error"); return; }
-  if (!confirm(`Confirm and train ${ids.length} selected candidate(s)?`)) return;
+  if (!confirm(`Confirm and add ${ids.length} selected candidate(s) to their assigned students' recognition galleries?`)) return;
 
   const button = $("#al-confirm-selected");
   button.disabled = true;
-  button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Training…';
+  button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Updating recognition…';
   let completed = 0;
   const errors = [];
   for (const id of ids) {
     try { await submitCandidateConfirmation(id); completed++; }
     catch (error) { errors.push(error.message); }
   }
-  if (completed) toast(`Trained ${completed} candidate(s).`, "success");
+  if (completed) toast(`Recognition improved with ${completed} candidate(s).`, "success");
   if (errors.length) toast(`${errors.length} candidate(s) failed: ${errors[0]}`, "error");
   loadDashboard();
   await loadActiveLearningCandidates();
